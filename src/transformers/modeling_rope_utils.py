@@ -922,6 +922,8 @@ class RopeParameters(TypedDict):
             Only used with 'llama3'. Scaling factor applied to low frequency components of the RoPE
         high_freq_factor (`float`, *optional*):
             Only used with 'llama3'. Scaling factor applied to high frequency components of the RoPE
+        llama_4_scaling_beta (`float`, *optional*):
+            Scaling factor applied to scale the attention after applying the RoPE.
     """
 
     rope_theta: float
@@ -935,3 +937,4 @@ class RopeParameters(TypedDict):
     long_factor: Optional[list[float]]
     low_freq_factor: Optional[float]
     high_freq_factor: Optional[float]
+    llama_4_scaling_beta: Optional[float]
