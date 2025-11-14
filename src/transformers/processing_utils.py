@@ -1645,13 +1645,15 @@ class ProcessorMixin(PushToHubMixin):
             for conversation in conversations:
                 images, videos = [], []
                 for message in conversation:
-                    visuals = [content for content in message["content"] if content["type"] in ["image", "video"]]
-                    audio_fnames = [
-                        content[key]
-                        for content in message["content"]
-                        for key in ["audio", "url", "path"]
-                        if key in content and content["type"] == "audio"
-                    ]
+                    # Filter cases where message content is a string to avoid looping error.
+                    if not isinstance(message["content"], str):
+                        visuals = [content for content in message["content"] if content["type"] in ["image", "video"]]
+                        audio_fnames = [
+                            content[key]
+                            for content in message["content"]
+                            for key in ["audio", "url", "path"]
+                            if key in content and content["type"] == "audio"
+                        ]
                     image_fnames = [
                         vision_info[key]
                         for vision_info in visuals
