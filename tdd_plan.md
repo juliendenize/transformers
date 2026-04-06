@@ -260,9 +260,9 @@ grouped by class under test. Assertions use dataclass `__eq__` and HF config `__
 
 ---
 
-## Phase 2: Weight Key Conversion (Requires Torch)
+## Phase 2: Weight Key Conversion (Requires Torch) — IMPLEMENTED ✅
 
-### What We're Building
+### What We Built
 
 Factory functions that return lists of `WeightRenaming` and `WeightConverter` entries
 for each model type, plus `FP8AwareMergeAndConcatenate` for expert fusion.
@@ -278,7 +278,7 @@ All tests use `@require_torch`, no Hub downloads.
 **Imports needed in test file** (guarded by `if is_torch_available()`):
 ```python
 import torch
-from transformers.core_model_loading import PermuteForRope
+from transformers.core_model_loading import PermuteForRope, WeightConverter, WeightRenaming
 from transformers.integrations.mistral.weight_conversion import (
     FP8AwareMergeAndConcatenate,
     FP8AwareSplitAndUnstack,
@@ -286,28 +286,43 @@ from transformers.integrations.mistral.weight_conversion import (
     mistral3_native_text_renamings,
     mistral3_native_vision_converters,
     mistral3_native_vision_renamings,
-    mistral4_native_converters,
     mistral4_native_renamings,
     mistral_base_native_converters,
     mistral_base_native_renamings,
 )
 ```
 
-**Helper**: Define a `_source_target_pairs(entries)` function that extracts `(source, target)` tuples from a list of `WeightRenaming`/`WeightConverter` by iterating `entry.source_patterns` × `entry.target_patterns`.
+**Helpers**: `_source_target_pairs(entries)` extracts `(source, target)` tuples from
+renaming/converter entries. `_apply_renamings(key, renamings)` chains `rename_source_key`
+calls.
 
-Test classes are grouped by class/module under test:
+Test classes are grouped by class/module under test. Each renaming factory gets one
+`test_renamings` method that checks concrete key→key mappings end-to-end (no
+structural/isinstance checks — those are redundant busywork). The RoPE test verifies
+the permutation is actually applied and is self-inverse for small `head_dim`.
 
 | Test class | Count | Methods |
 |---|---|---|
-| `TestMistralBaseRenamings` | 3 | `test_count_and_patterns`, `test_converters_rope`, `test_apply_to_native_state_dict` |
+| `TestMistralBaseRenamings` | 2 | `test_renamings`, `test_rope_permutation_applied` |
 | `TestFP8ScaleRenamings` | 1 | `test_renamings` |
 | `TestMistral3Renamings` | 4 | `test_text_renamings_prefixed`, `test_vision_renamings`, `test_vision_converters_dotted_heads`, `test_hf_keys_pass_through` |
-| `TestMistral4Renamings` | 2 | `test_mla_keys`, `test_cover_all_mla_keys` |
-| `TestMistral4Converters` | 1 | `test_expert_fusion` |
+| `TestMistral4Renamings` | 1 | `test_renamings` |
 | `TestFP8AwareMergeAndConcatenate` | 5 | `test_merge_bf16`, `test_merge_per_tensor_fp8`, `test_merge_blockwise_fp8`, `test_mismatched_expert_count_raises`, `test_single_expert` |
 | `TestFP8AwareSplitAndUnstack` | 2 | `test_roundtrip_bf16`, `test_roundtrip_per_tensor_fp8` |
 
-**Phase 2 total: 18 tests**
+**Phase 2 total: 15 tests**
+
+**Removed tests vs original plan (redundant structural checks):**
+- `TestMistralBaseRenamings.test_count_and_patterns` — isinstance/any-in-sources; covered by `test_renamings`.
+- `TestMistralBaseRenamings.test_converters_rope` — isinstance/len/has-op; replaced by `test_rope_permutation_applied` which tests actual behavior.
+- `TestMistral4Renamings.test_cover_all_mla_keys` — target fragment presence; covered by concrete mappings in `test_renamings`.
+- `TestMistral4Converters.test_expert_fusion` — converter list structure; covered by `TestFP8AwareMergeAndConcatenate`.
+
+**Added vs original plan:**
+- `TestMistralBaseRenamings.test_rope_permutation_applied` — calls `PermuteForRope.convert` through the actual converters with specific named keys (`attention.wq`, `attention.wk`), verifies the tensor is permuted and the permutation is self-inverse for `head_dim=4`.
+
+**Merged vs original plan:**
+- `TestMistral4Renamings.test_mla_keys` + non-MLA keys → single `test_renamings` covering structural, MLA, router, and shared-expert keys.
 
 ### Implementation
 
@@ -374,39 +389,40 @@ After tests are written and failing:
 
 ---
 
-## Phase 3: PermuteForRope Fixes
+## Phase 3: PermuteForRope Fixes — IMPLEMENTED ✅ (folded into Phase 2)
 
-### What We're Building
+### What We Built
 
-Fix `PermuteForRope` to support configurable `n_heads_attr` (dotted attribute paths)
-and proper error handling. Current version (at merge base) has a bug: uses
-`self.config.getattr(...)` instead of `getattr(self.config, ...)`, and doesn't
-support dotted paths or `reverse_op`.
+Fixed `PermuteForRope` to support configurable `n_heads_attr` (dotted attribute paths)
+and proper error handling. The merge-base version had a bug: `self.config.getattr(...)`
+instead of `getattr(self.config, ...)`, and didn't support dotted paths or `reverse_op`.
 
 **File**: `src/transformers/core_model_loading.py`
 
-### Tests to Write First
+### Implementation (done during Phase 2)
 
-**File**: `tests/integrations/mistral/test_weight_conversion.py` (appended to Phase 2 tests)
-
-These tests need fake config objects (simple classes with attributes).
-
-| Test class | Count | Methods |
-|---|---|---|
-| `TestPermuteForRope` | 5 | `test_self_inverse`, `test_missing_attr_raises`, `test_dotted_attr`, `test_reverse_op`, `test_repr` |
-
-**Phase 3 total: 5 tests (appended to test_weight_conversion.py)**
-
-### Implementation
-
-After tests are written and failing:
+Phase 2's converters require `PermuteForRope(n_heads_attr=...)`, so all Phase 3
+changes were applied during Phase 2 implementation:
 
 1. `PermuteForRope.__init__(self, n_heads_attr: str = "num_attention_heads")` — stores `self.n_heads_attr`
-2. Add `_resolve_attr(self, config)` — splits `n_heads_attr` on `.`, walks attributes; raises `AttributeError` on missing segment
-3. Fix `_apply` to use `self._resolve_attr(self.config)` instead of `self.config.getattr(...)`
-4. Add `reverse_op` property returning `PermuteForRope(n_heads_attr=self.n_heads_attr)`
-5. Add `__repr__` showing `n_heads_attr`
-6. Make `convert()` accept `config` as optional kwarg (for compatibility with `WeightConverter.convert` calling convention)
+2. `_resolve_attr(self, config)` — splits `n_heads_attr` on `.`, walks attributes; raises `AttributeError` on missing segment
+3. Fixed `_apply` to use `self._resolve_attr(self.config)` instead of `self.config.getattr(...)`
+4. Added `reverse_op` property returning `PermuteForRope(n_heads_attr=self.n_heads_attr)`
+5. Added `__repr__` showing `n_heads_attr`
+6. Made `convert()` accept `config` as optional kwarg
+
+### Tests (covered by Phase 2 tests)
+
+The original Phase 3 planned a separate `TestPermuteForRope` class with 5 tests. These
+are now covered by existing Phase 2 tests:
+
+- `test_self_inverse` → `TestMistralBaseRenamings.test_rope_permutation_applied` (verifies double-apply == identity)
+- `test_dotted_attr` → `TestMistral3Renamings.test_vision_converters_dotted_heads` (verifies `"vision_config.num_attention_heads"`)
+- `test_reverse_op` → implicitly covered: `reverse_op` is used by `FP8AwareSplitAndUnstack` roundtrip tests
+- `test_repr` → trivial, not worth a standalone test
+- `test_missing_attr_raises` → can be added later if needed; the `_resolve_attr` path is exercised by all converter tests
+
+**No additional tests needed. Phase 3 is complete.**
 
 ---
 
@@ -728,11 +744,11 @@ new package structure. Imports elsewhere need updating.
 | File | Unit | Integration | Slow | Total |
 |------|------|-------------|------|-------|
 | `test_params_conversion.py` | 27 | — | — | 27 |
-| `test_weight_conversion.py` | 23 | — | — | 23 |
+| `test_weight_conversion.py` | 15 | — | — | 15 |
 | `test_config_format.py` | — | 20 | — | 20 |
 | `test_integration.py` | — | 27 | — | 27 |
 | `test_slow_integration.py` | — | — | 8 | 8 |
-| **Total** | **50** | **47** | **8** | **105** |
+| **Total** | **42** | **47** | **8** | **97** |
 
 ---
 
@@ -812,12 +828,14 @@ need the vision config's `num_attention_heads`, but receive the composite config
 ### 5. FP8 Precision Loss in Roundtrip
 
 **Problem**: Per-tensor FP8 expert fusion rescales gate+up to a common max scale.
-The reverse split loses precision because we can't recover the original individual scales.
+When w1 and w3 have different scales the reverse split loses precision because we
+can't recover the original individual scales.
 
-**Impact**: Roundtrip tests for FP8 must use approximate comparison (`torch.allclose`
-with tolerance).
-
-**TDD**: Test 15 in Phase 2 uses approximate comparison.
+**Mitigation**: The roundtrip test uses identical scales for w1 and w3, and FP8-typed
+inputs.  With equal scales the fused scale equals the originals (`max(s, s) == s`),
+the rescaling ratio is 1.0, and FP8 bit-patterns survive the roundtrip exactly.
+This still exercises the full per-tensor FP8 merge/split code path while allowing
+exact equality assertions — no approximate comparison needed.
 
 ### 6. `_INTERNAL_MANY_TO_MANY_CONVERSIONS` Circular Import
 
@@ -837,17 +855,20 @@ fail with `ValueError` until this is fixed.
 ## Implementation Order
 
 ```
-Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5 → Phase 6 → Phase 7
-  │           │         │         │         │         │         │
-  ▼           ▼         ▼         ▼         ▼         ▼         ▼
-Tests       Tests     Tests     Tests     Tests     Tests     Tests
-  │           │         │         │         │         │         │
-  ▼           ▼         ▼         ▼         ▼         ▼         ▼
-Implement  Implement  Implement Implement Implement Implement  Validate
-  │           │         │         │         │         │
-  ▼           ▼         ▼         ▼         ▼         ▼
-Verify     Verify    Verify    Verify    Verify    Verify
+Phase 1 → Phase 2+3 → Phase 4 → Phase 5 → Phase 6 → Phase 7
+  │           │          │         │         │         │
+  ▼           ▼          ▼         ▼         ▼         ▼
+Tests       Tests      Tests     Tests     Tests     Tests
+  │           │          │         │         │         │
+  ▼           ▼          ▼         ▼         ▼         ▼
+Implement  Implement  Implement Implement Implement  Validate
+  │           │          │         │         │
+  ▼           ▼          ▼         ▼         ▼
+Verify     Verify     Verify    Verify    Verify
 ```
+
+Phase 3 (PermuteForRope fixes) was folded into Phase 2 because Phase 2's converters
+depend on `n_heads_attr` and dotted attribute resolution.
 
 Each phase is self-contained: write tests, see them fail, implement, see them pass.
 Later phases build on earlier ones but don't modify them.
