@@ -19,6 +19,8 @@ entries for each model type, plus `FP8AwareMergeAndConcatenate` for expert fusio
 
 from __future__ import annotations
 
+import json
+import os
 from typing import Any
 
 import torch
@@ -32,6 +34,7 @@ from ...core_model_loading import (
     WeightRenaming,
     register_many_to_many_conversion,
 )
+from ...utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME
 
 
 _FP8_DTYPE = torch.float8_e4m3fn
@@ -351,3 +354,54 @@ def mistral4_native_converters() -> list[WeightConverter]:
 
 register_many_to_many_conversion(FP8AwareMergeAndConcatenate)
 register_many_to_many_conversion(FP8AwareSplitAndUnstack)
+
+
+def _add_variant(weights_name: str, variant: str | None = None) -> str:
+    r"""Insert a variant suffix into `weights_name` (e.g. ``model.fp16.safetensors``)."""
+    if variant is not None:
+        path, name = weights_name.rsplit(".", 1)
+        weights_name = f"{path}.{variant}.{name}"
+    return weights_name
+
+
+def _save_native_mistral_format(
+    save_directory: str | os.PathLike,
+    config,
+    index: dict | None,
+    variant: str | None,
+) -> None:
+    r"""Rename HF weight files to native Mistral names and write ``params.json``."""
+    save_directory = str(save_directory)
+
+    # Rename model.safetensors → consolidated.safetensors (single shard)
+    hf_single = os.path.join(save_directory, _add_variant(SAFE_WEIGHTS_NAME, variant))
+    consolidated_single = os.path.join(save_directory, "consolidated.safetensors")
+    if os.path.isfile(hf_single):
+        os.rename(hf_single, consolidated_single)
+
+    # Rename sharded files: model-00001-of-00005.safetensors → consolidated-00001-of-00005.safetensors
+    if index is not None:
+        new_weight_map = {}
+        for param_name, shard_file in index["weight_map"].items():
+            new_shard = shard_file.replace("model", "consolidated")
+            new_weight_map[param_name] = new_shard
+            src = os.path.join(save_directory, shard_file)
+            dst = os.path.join(save_directory, new_shard)
+            if os.path.isfile(src) and src != dst:
+                os.rename(src, dst)
+        index["weight_map"] = new_weight_map
+
+        # Rewrite index file
+        hf_index_name = os.path.join(save_directory, _add_variant(SAFE_WEIGHTS_INDEX_NAME, variant))
+        consolidated_index = os.path.join(save_directory, "consolidated.safetensors.index.json")
+        if os.path.isfile(hf_index_name):
+            os.remove(hf_index_name)
+        with open(consolidated_index, "w", encoding="utf-8") as f:
+            content = json.dumps(index, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+            f.write(content)
+
+    # Write params.json if the config supports it
+    if hasattr(config, "_config_to_params_json"):
+        params = config._config_to_params_json()
+        with open(os.path.join(save_directory, "params.json"), "w", encoding="utf-8") as f:
+            json.dump(params, f, indent=2, ensure_ascii=False)

@@ -71,6 +71,7 @@ from .integrations.flash_attention import flash_attention_forward
 from .integrations.flash_paged import paged_attention_forward
 from .integrations.flex_attention import flex_attention_forward
 from .integrations.hub_kernels import allow_all_hub_kernels, is_kernel
+from .integrations.mistral.weight_conversion import _save_native_mistral_format
 from .integrations.moe import ALL_EXPERTS_FUNCTIONS
 from .integrations.peft import maybe_load_adapters
 from .integrations.sdpa_attention import sdpa_attention_forward
@@ -1146,49 +1147,6 @@ class EmbeddingAccessMixin:
         """
         if getattr(self, "lm_head"):
             self.lm_head = new_embeddings
-
-
-def _save_native_mistral_format(
-    save_directory: str | os.PathLike,
-    config,
-    index: dict | None,
-    variant: str | None,
-) -> None:
-    r"""Rename HF weight files to native Mistral names and write ``params.json``."""
-    save_directory = str(save_directory)
-
-    # Rename model.safetensors → consolidated.safetensors (single shard)
-    hf_single = os.path.join(save_directory, _add_variant(SAFE_WEIGHTS_NAME, variant))
-    consolidated_single = os.path.join(save_directory, "consolidated.safetensors")
-    if os.path.isfile(hf_single):
-        os.rename(hf_single, consolidated_single)
-
-    # Rename sharded files: model-00001-of-00005.safetensors → consolidated-00001-of-00005.safetensors
-    if index is not None:
-        new_weight_map = {}
-        for param_name, shard_file in index["weight_map"].items():
-            new_shard = shard_file.replace("model", "consolidated")
-            new_weight_map[param_name] = new_shard
-            src = os.path.join(save_directory, shard_file)
-            dst = os.path.join(save_directory, new_shard)
-            if os.path.isfile(src) and src != dst:
-                os.rename(src, dst)
-        index["weight_map"] = new_weight_map
-
-        # Rewrite index file
-        hf_index_name = os.path.join(save_directory, _add_variant(SAFE_WEIGHTS_INDEX_NAME, variant))
-        consolidated_index = os.path.join(save_directory, "consolidated.safetensors.index.json")
-        if os.path.isfile(hf_index_name):
-            os.remove(hf_index_name)
-        with open(consolidated_index, "w", encoding="utf-8") as f:
-            content = json.dumps(index, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
-            f.write(content)
-
-    # Write params.json if the config supports it
-    if hasattr(config, "_config_to_params_json"):
-        params = config._config_to_params_json()
-        with open(os.path.join(save_directory, "params.json"), "w", encoding="utf-8") as f:
-            json.dump(params, f, indent=2, ensure_ascii=False)
 
 
 class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToHubMixin, PeftAdapterMixin):
@@ -3284,11 +3242,6 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
         Whether gradient checkpointing is activated for this model or not.
         """
         return any(hasattr(m, "gradient_checkpointing") and m.gradient_checkpointing for m in self.modules())
-
-    @staticmethod
-    def _save_native_mistral_format(save_directory, config, index, variant):
-        r"""Rename model.safetensors → consolidated.safetensors and write params.json."""
-        _save_native_mistral_format(save_directory, config, index, variant)
 
     def save_pretrained(
         self,

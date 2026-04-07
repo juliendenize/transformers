@@ -622,18 +622,19 @@ After tests are written and failing:
 
 ---
 
-## Phase 6: save_pretrained Native Format + Roundtrip
+## Phase 6: save_pretrained Native Format + Roundtrip — IMPLEMENTED ✅
 
-### What We're Building
+### What We Built
 
 Support for `save_pretrained(save_format="mistral")` that saves in native Mistral format:
-`params.json` + `consolidated.safetensors` with native key names. Also fix the
+`params.json` + `consolidated.safetensors` with native key names. Also fixed the
 `revert_weight_conversion` regex-key bug that blocks this.
 
 **Files**:
-- `src/transformers/modeling_utils.py` (add `save_format` parameter)
+- `src/transformers/modeling_utils.py` (add `save_format` parameter, minimal diff)
+- `src/transformers/integrations/mistral/weight_conversion.py` (file renaming + `params.json` logic)
 - `src/transformers/core_model_loading.py` (fix `revert_weight_conversion` / `WeightConverter.convert`)
-- `src/transformers/configuration_utils.py` (strip `transformers_weights` on save)
+- `src/transformers/configuration_utils.py` (strip `_loaded_from_mistral_format` on save)
 
 ### Tests to Write First
 
@@ -652,36 +653,33 @@ Test classes are grouped by class/module under test (appended to test_integratio
 
 ### Implementation
 
-After tests are written and failing:
+1. **Fixed `revert_weight_conversion` / `WeightConverter.convert` regex-key bug**
+   (`core_model_loading.py`):
 
-1. **Fix `revert_weight_conversion` / `WeightConverter.convert` regex-key bug**:
+   The root cause was in `WeightConverter.convert()`: the `StopIteration` fallback let
+   regex pattern keys leak through as literal key names. Fixed by adding regex
+   substitution to derive concrete keys from the full parameter name.
 
-   The root cause is in `WeightConverter.convert()` (lines 752-758 at merge base):
-   ```python
-   try:
-       prefix, _, suffix = next(full_name.partition(k) for k in collected_tensors.keys() if k in full_name)
-       collected_tensors = {prefix + k + suffix: v for k, v in collected_tensors.items()}
-   except StopIteration:
-       pass
-   ```
-   When invoked via `revert_weight_conversion`, `collected_tensors` keys are regex patterns
-   (the reversed source patterns), which don't appear as substrings of `full_name`.
-
-   **Fix approach**: After ops produce output with target pattern keys, map them to concrete
-   names using the regex substitution. Instead of simple `partition`, use `re.sub` on the
-   source pattern with the layer name to derive the concrete output key.
-
-2. **Add `save_format` parameter to `save_pretrained`**:
+2. **Added `save_format` parameter to `save_pretrained`** (`modeling_utils.py`):
    - `save_format: str | None = None` — `"hf"`, `"mistral"`, or `None` (auto)
    - Validate: raise `ValueError` for unknown values
-   - When `None`: check `config._loaded_from_mistral_format`; if True → save native, else → save HF
-   - When saving native:
-      - Write `params.json` via `config._config_to_params_json()` (which calls `native_config_from_hf_config` + `dataclasses.asdict`)
-     - Save weights, then rename `model*.safetensors` → `consolidated*.safetensors`
-     - Rewrite index JSON with updated weight_map filenames
+   - `save_format="hf"`: skip `revert_weight_conversion` (keep HF key names)
+   - `save_format="mistral"`: revert keys to native, then call
+     `_save_native_mistral_format` for file renaming + `params.json`
 
-3. **Strip internal metadata from saved config**:
-   - Remove `_loaded_from_mistral_format` and `transformers_weights` from `config.json` output
+3. **Moved `_save_native_mistral_format` to `weight_conversion.py`**:
+   The function that renames `model.safetensors` → `consolidated.safetensors` and writes
+   `params.json` lives in `integrations/mistral/weight_conversion.py`, not in
+   `modeling_utils.py`. This keeps the `modeling_utils.py` diff minimal (~16 added lines):
+   - 1 top-level import
+   - 1 new parameter + 4-line docstring + 2-line validation
+   - 4-line `save_format="hf"` branch (skip revert)
+   - 3-line `save_format="mistral"` post-save call
+   The function inlines a local `_add_variant` helper to avoid circular imports
+   (the canonical `_add_variant` is defined in `modeling_utils.py`).
+
+4. **Stripped internal metadata from saved config** (`configuration_utils.py`):
+   - Remove `_loaded_from_mistral_format` and `transformers_weights` from `config.json`
    - These are runtime flags, not config parameters
 
 ---
@@ -734,7 +732,7 @@ src/transformers/integrations/mistral/
     __init__.py                    # Package init with exports
     config_format.py               # MistralFormatConfig (Phase 4)
     params_conversion.py           # Native config dataclass hierarchy (Phase 1)
-    weight_conversion.py           # Weight conversion factories + FP8 ops (Phase 2)
+    weight_conversion.py           # Weight conversion factories + FP8 ops (Phase 2) + native save (Phase 6)
 
 tests/integrations/
     __init__.py
@@ -753,7 +751,7 @@ tests/integrations/
 ```
 src/transformers/core_model_loading.py              # Phase 3: PermuteForRope fixes + Phase 6: revert bug fix
 src/transformers/conversion_mapping.py              # Phase 5: Register all model types
-src/transformers/modeling_utils.py                   # Phase 6: save_format parameter
+src/transformers/modeling_utils.py                   # Phase 6: save_format parameter (minimal diff: ~16 lines)
 src/transformers/configuration_utils.py             # Phase 6: Strip internal metadata on save
 src/transformers/models/mistral/configuration_mistral.py       # Phase 4: MistralFormatConfig inheritance
 src/transformers/models/ministral3/configuration_ministral3.py # Phase 4: MistralFormatConfig inheritance
