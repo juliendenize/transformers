@@ -30,6 +30,7 @@ from ...core_model_loading import (
     PermuteForRope,
     WeightConverter,
     WeightRenaming,
+    register_many_to_many_conversion,
 )
 
 
@@ -346,3 +347,7 @@ def mistral4_native_converters() -> list[WeightConverter]:
             operations=[MergeModulelist(dim=0)],
         ),
     ]
+
+
+register_many_to_many_conversion(FP8AwareMergeAndConcatenate)
+register_many_to_many_conversion(FP8AwareSplitAndUnstack)

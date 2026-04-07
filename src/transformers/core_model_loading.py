@@ -889,25 +889,16 @@ class PrefixChange(WeightRenaming):
 
 
 # List of classes that are known to be able to use m:n
-_INTERNAL_MANY_TO_MANY_CONVERSIONS: tuple[type[ConversionOps], ...] | None = None
+_INTERNAL_MANY_TO_MANY_CONVERSIONS: list[type[ConversionOps]] = [
+    ErnieFuseAndSplitTextVisionExperts,
+    ErnieSplitAndDecoupleTextVisionExperts,
+]
 
 
-def _get_internal_many_to_many_conversions() -> tuple[type[ConversionOps], ...]:
-    r"""Lazily build the tuple of many-to-many ConversionOps classes.
-
-    Uses lazy import for classes defined in sub-packages to avoid circular imports.
-    """
-    global _INTERNAL_MANY_TO_MANY_CONVERSIONS
-    if _INTERNAL_MANY_TO_MANY_CONVERSIONS is None:
-        from .integrations.mistral.weight_conversion import FP8AwareMergeAndConcatenate, FP8AwareSplitAndUnstack
-
-        _INTERNAL_MANY_TO_MANY_CONVERSIONS = (
-            ErnieFuseAndSplitTextVisionExperts,
-            ErnieSplitAndDecoupleTextVisionExperts,
-            FP8AwareMergeAndConcatenate,
-            FP8AwareSplitAndUnstack,
-        )
-    return _INTERNAL_MANY_TO_MANY_CONVERSIONS
+def register_many_to_many_conversion(cls: type[ConversionOps]) -> None:
+    r"""Register a `ConversionOps` subclass as supporting many-to-many weight patterns."""
+    if cls not in _INTERNAL_MANY_TO_MANY_CONVERSIONS:
+        _INTERNAL_MANY_TO_MANY_CONVERSIONS.append(cls)
 
 
 class WeightConverter(WeightTransform):
@@ -921,7 +912,7 @@ class WeightConverter(WeightTransform):
 
         if bool(len(self.source_patterns) - 1) + bool(len(self.target_patterns) - 1) >= 2:
             # We allow many-to-many only if we use an internal operation that can handle it
-            if not any(isinstance(op, _get_internal_many_to_many_conversions()) for op in self.operations):
+            if not any(isinstance(op, tuple(_INTERNAL_MANY_TO_MANY_CONVERSIONS)) for op in self.operations):
                 raise ValueError(
                     f"source keys={self.source_patterns}, target_patterns={self.target_patterns} but you can only have one to many, one to one or many to one."
                 )

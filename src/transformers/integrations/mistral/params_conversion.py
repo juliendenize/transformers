@@ -687,6 +687,7 @@ def native_config_from_hf_config(
     model_type: Literal[MistralModelType.MISTRAL3], config: Mistral3Config
 ) -> Mistral3NativeConfig: ...
 
+
 def native_config_from_hf_config(
     model_type: MistralModelType,
     config: MistralConfig | Ministral3Config | Mistral4Config | Mistral3Config,

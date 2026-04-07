@@ -28,6 +28,17 @@ from .core_model_loading import (
     WeightRenaming,
     WeightTransform,
 )
+from .integrations.mistral.weight_conversion import (
+    fp8_scale_renamings,
+    mistral3_native_text_converters,
+    mistral3_native_text_renamings,
+    mistral3_native_vision_converters,
+    mistral3_native_vision_renamings,
+    mistral4_native_converters,
+    mistral4_native_renamings,
+    mistral_base_native_converters,
+    mistral_base_native_renamings,
+)
 
 
 if TYPE_CHECKING:
@@ -789,19 +800,6 @@ def _build_checkpoint_conversion_mapping():
         WeightRenaming("mlp.experts.e_score_correction_bias", "mlp.gate.e_score_correction_bias"),
         WeightRenaming("mlp.shared_expert.", "mlp.shared_experts."),
     ]
-
-    # Lazy import to avoid circular dependencies with core_model_loading
-    from .integrations.mistral.weight_conversion import (
-        fp8_scale_renamings,
-        mistral3_native_text_converters,
-        mistral3_native_text_renamings,
-        mistral3_native_vision_converters,
-        mistral3_native_vision_renamings,
-        mistral4_native_converters,
-        mistral4_native_renamings,
-        mistral_base_native_converters,
-        mistral_base_native_renamings,
-    )
 
     mapping["mistral"] = mistral_base_native_renamings() + mistral_base_native_converters()
     mapping["ministral3"] = mistral_base_native_renamings() + mistral_base_native_converters() + fp8_scale_renamings()
