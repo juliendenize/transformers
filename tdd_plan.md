@@ -88,7 +88,7 @@ mapping in `to_hf_config()` / `from_hf_config()`.
 
 **File**: `src/transformers/integrations/mistral/params_conversion.py`
 **Tests**: `tests/integrations/mistral/test_params_conversion.py`
-**25/25 tests passing.**
+**30/30 tests passing.**
 
 ### Architecture
 
@@ -96,7 +96,12 @@ mapping in `to_hf_config()` / `from_hf_config()`.
 
 ```python
 HFConfigT = TypeVar("HFConfigT", bound=PreTrainedConfig)
-MistralModelType = Literal["mistral", "ministral3", "mistral4", "mistral3"]
+
+class MistralModelType(StrEnum):
+    MISTRAL = "mistral"
+    MINISTRAL3 = "ministral3"
+    MISTRAL4 = "mistral4"
+    MISTRAL3 = "mistral3"
 
 class NativeToHFConfigMixin(ABC, Generic[HFConfigT]):
     r"""Abstract mixin binding a native config dataclass to its HF config type."""
@@ -173,56 +178,50 @@ because it is a composite VLM config, not a text model config.
 #### No Code Duplication in Mistral3NativeConfig
 
 `Mistral3NativeConfig.from_params_json` delegates text backbone detection to:
-1. `_detect_text_model_type(params)` — returns `Literal["mistral", "ministral3", "mistral4"]`
-   based on key presence (`moe` → mistral4, `yarn`/`quantization` → ministral3, else → mistral)
+1. `_detect_text_model_type(params)` — returns `MistralModelType`
+   based on key presence (`moe` → `MISTRAL4`, `yarn`/`quantization` → `MINISTRAL3`, else → `MISTRAL`)
 2. `native_config_for_model_type(model_type, text_params)` — the same dispatcher used externally
 
 `Mistral3NativeConfig.from_hf_config` similarly delegates to `native_config_from_hf_config`
 with `text_hf.model_type`. This avoids duplicating detection logic.
 
-#### Dispatcher Functions (with @overload)
+#### Dispatcher Functions (with @overload and StrEnum)
 
-Both dispatchers use `@overload` with `Literal` discriminators so that type checkers
-can narrow the return type based on the model type string:
+Both dispatchers use `@overload` with `MistralModelType` enum members so that type
+checkers can narrow the return type. A `str` fallback overload accepts plain strings
+(e.g., `cls.model_type` from `PreTrainedConfig`) and returns the union type:
 
 ```python
 @overload
-def native_config_for_model_type(model_type: Literal["mistral"], params: dict) -> MistralNativeConfig: ...
+def native_config_for_model_type(model_type: MistralModelType.MISTRAL, params: dict) -> MistralNativeConfig: ...
 @overload
-def native_config_for_model_type(model_type: Literal["ministral3"], params: dict) -> Ministral3NativeConfig: ...
+def native_config_for_model_type(model_type: MistralModelType.MINISTRAL3, params: dict) -> Ministral3NativeConfig: ...
 @overload
-def native_config_for_model_type(model_type: Literal["mistral4"], params: dict) -> Mistral4NativeConfig: ...
+def native_config_for_model_type(model_type: MistralModelType.MISTRAL4, params: dict) -> Mistral4NativeConfig: ...
 @overload
-def native_config_for_model_type(model_type: Literal["mistral3"], params: dict) -> Mistral3NativeConfig: ...
+def native_config_for_model_type(model_type: MistralModelType.MISTRAL3, params: dict) -> Mistral3NativeConfig: ...
+@overload
+def native_config_for_model_type(model_type: str, params: dict) -> MistralNativeConfig | ...: ...
 
 def native_config_for_model_type(
-    model_type: MistralModelType, params: dict
-) -> MistralNativeConfig | Ministral3NativeConfig | Mistral4NativeConfig | Mistral3NativeConfig:
-    ...
-
-@overload
-def native_config_from_hf_config(model_type: Literal["mistral"], config: MistralConfig) -> MistralNativeConfig: ...
-@overload
-def native_config_from_hf_config(model_type: Literal["ministral3"], config: Ministral3Config) -> Ministral3NativeConfig: ...
-@overload
-def native_config_from_hf_config(model_type: Literal["mistral4"], config: Mistral4Config) -> Mistral4NativeConfig: ...
-@overload
-def native_config_from_hf_config(model_type: Literal["mistral3"], config: Mistral3Config) -> Mistral3NativeConfig: ...
-
-def native_config_from_hf_config(
-    model_type: MistralModelType,
-    config: MistralConfig | Ministral3Config | Mistral4Config | Mistral3Config,
+    model_type: str, params: dict
 ) -> MistralNativeConfig | Ministral3NativeConfig | Mistral4NativeConfig | Mistral3NativeConfig:
     ...
 ```
 
-### Tests (27 total, all passing)
+Same pattern for `native_config_from_hf_config`. The `match`/`case` branches use
+enum members (`MistralModelType.MISTRAL`, etc.), which compare equal to plain strings
+because `StrEnum` inherits from `str`.
+
+### Tests (30 total, all passing)
 
 **File**: `tests/integrations/mistral/test_params_conversion.py`
 
-All tests are pure Python (no `@require_torch`, no Hub access). Tests use `unittest.TestCase`,
-grouped by class under test. Assertions use dataclass `__eq__` and HF config `__eq__`
-(full object equality) rather than field-by-field checks.
+All tests are pure Python (no `@require_torch`, no Hub access). Tests use pytest-style
+classes (no `unittest.TestCase`), with `@pytest.fixture(scope="session")` from
+`conftest.py`. Assertions use dataclass `__eq__` and HF config `__eq__` (full object
+equality) rather than field-by-field checks. `TestDispatchers` uses
+`@pytest.mark.parametrize` for the dispatch test.
 
 | Test class | Count | Methods |
 |---|---|---|
@@ -232,7 +231,7 @@ grouped by class under test. Assertions use dataclass `__eq__` and HF config `__
 | `TestMinistral3NativeConfig` | 5 | `test_from_params_json`, `test_from_params_json_no_quantization`, `test_to_hf_config_with_yarn`, `test_to_hf_config_with_fp8`, `test_roundtrip` |
 | `TestMistral4NativeConfig` | 3 | `test_from_params_json`, `test_to_hf_config`, `test_roundtrip` |
 | `TestMistral3NativeConfig` | 6 | `test_from_params_json`, `test_to_hf_config`, `test_roundtrip`, `test_backbone_auto_detection_base`, `test_backbone_auto_detection_yarn`, `test_backbone_auto_detection_moe` |
-| `TestDispatchers` | 3 | `test_native_config_for_model_type_dispatches_correctly`, `test_native_config_for_model_type_unknown_raises`, `test_native_config_from_hf_config_unknown_raises` |
+| `TestDispatchers` | 6 | `test_native_config_for_model_type_dispatches_correctly` (×4 parametrized), `test_native_config_for_model_type_unknown_raises`, `test_native_config_from_hf_config_unknown_raises` |
 
 ### Key Design Decisions
 
@@ -240,9 +239,11 @@ grouped by class under test. Assertions use dataclass `__eq__` and HF config `__
   generic mixin. Each concrete class binds `HFConfigT` to its specific HF config type.
   Subclasses rebind by listing the mixin again (e.g.
   `Ministral3NativeConfig(MistralNativeConfig, NativeToHFConfigMixin[Ministral3Config])`).
-- **`@overload` dispatchers**: Both dispatcher functions use `@overload` with `Literal`
-  model type strings and the proper union types in the implementation signature.
-  `MistralModelType` is a type alias for the valid literals.
+- **`@overload` dispatchers with `StrEnum`**: Both dispatcher functions use `@overload`
+  with `MistralModelType` enum members for type narrowing, plus a `str` fallback
+  overload for callers passing `cls.model_type` (which is `ClassVar[str]` on
+  `PreTrainedConfig`). Since `StrEnum` inherits from `str`, enum members compare
+  equal to plain strings in `match`/`case` and equality checks.
 - **No code duplication**: `Mistral3NativeConfig.from_params_json` and `.from_hf_config`
   delegate to the dispatcher functions and `_detect_text_model_type` rather than
   reimplementing detection logic.
@@ -426,80 +427,111 @@ are now covered by existing Phase 2 tests:
 
 ---
 
-## Phase 4: Config Format Detection & Loading
+## Phase 4: Config Format Detection & Loading — IMPLEMENTED ✅
 
-### What We're Building
+### What We Built
 
 `MistralFormatConfig` — a `PreTrainedConfig` subclass that overrides `get_config_dict()`
 to auto-detect and load from `params.json` when `config.json` is absent.
 
-**Files**:
-- `src/transformers/integrations/mistral/config_format.py` (new)
-- `src/transformers/models/mistral/configuration_mistral.py` (modify inheritance)
-- `src/transformers/models/ministral3/configuration_ministral3.py` (modify inheritance)
-- `src/transformers/models/mistral3/configuration_mistral3.py` (modify inheritance)
-- `src/transformers/models/mistral4/configuration_mistral4.py` (modify inheritance)
+**File**: `src/transformers/integrations/mistral/config_format.py`
+**Tests**: `tests/integrations/mistral/test_config_format.py`
+**Shared fixtures**: `tests/integrations/mistral/conftest.py`
+**19/19 tests passing.**
 
-### Tests to Write First
+### Architecture
+
+#### `MistralFormatConfig(PreTrainedConfig)` class
+
+- `get_config_dict(cls, pretrained_model_name_or_path, **kwargs)` classmethod:
+  - Pops `mistral_format` from kwargs
+  - When `mistral_format` is `None` or `False`: tries `config.json` via `super().get_config_dict()`
+  - When result is empty and `mistral_format is False`: raises `OSError`
+  - When result is empty and `mistral_format is None`: falls through to `_get_config_dict_from_params_json()`
+  - When `mistral_format is True`: goes directly to `_get_config_dict_from_params_json()`
+- `_get_config_dict_from_params_json(cls, path, **kwargs)` classmethod:
+  - `cached_file(path, "params.json")` → load JSON
+  - `native_config_for_model_type(cls.model_type, params_dict).to_hf_config().to_dict()` → config_dict
+  - `_detect_weight_file(path)` → set `transformers_weights` if consolidated found
+  - Set `_loaded_from_mistral_format = True`
+  - Return `(config_dict, kwargs)`
+- `_detect_weight_file(cls, path, **kwargs)` classmethod:
+  - Probes HF files first (`model.safetensors`, `model.safetensors.index.json`) → return `None` if found
+  - Then probes consolidated files → return filename if found
+  - Returns `None` when nothing found (not an error — weights may not be present yet)
+- `_config_to_params_json(self)` method:
+  - `native_config_from_hf_config(self.model_type, self)` → `dataclasses.asdict(native)`
+
+Constants: `_PARAMS_JSON`, `_CONSOLIDATED_SINGLE`, `_CONSOLIDATED_INDEX`, `_HF_SINGLE`, `_HF_INDEX`
+
+#### Circular import handling
+
+`config_format.py` → `params_conversion.py` → `configuration_mistral.py` → `config_format.py`
+
+Broken via lazy imports: `config_format.py` imports `native_config_for_model_type` and
+`native_config_from_hf_config` inside the two methods that use them, not at module level.
+All other imports are top-level.
+
+#### Config class inheritance changes
+
+Each config class now inherits from `MistralFormatConfig` instead of `PreTrainedConfig`:
+- `MistralConfig(MistralFormatConfig)` — `configuration_mistral.py`
+- `Ministral3Config(MistralFormatConfig)` — `configuration_ministral3.py`
+- `Mistral3Config(MistralFormatConfig)` — `configuration_mistral3.py`
+- `Mistral4Config(MistralFormatConfig)` — `configuration_mistral4.py`
+
+### Tests (19 total, all passing)
 
 **File**: `tests/integrations/mistral/test_config_format.py`
 
-**Imports needed**:
-```python
-from unittest.mock import patch
-from transformers import MistralConfig
-from transformers.integrations.mistral.config_format import (
-    _CONSOLIDATED_INDEX, _CONSOLIDATED_SINGLE, _HF_INDEX, _HF_SINGLE,
-    MistralFormatConfig,
-)
-```
+All tests are pure Python (no `@require_torch`, no Hub access). Tests use a single
+pytest-style class `TestMistralFormat` (no `unittest.TestCase`), with
+`@pytest.fixture(scope="session")` from `conftest.py` and `@pytest.mark.parametrize`
+for multi-variant tests. Fixture names are resolved via `request.getfixturevalue()`.
 
-Some tests require `@require_torch` for config classes that need torch (Ministral3Config, Mistral4Config).
-
-**Mock helper**: Define `_make_cached_file_side_effect(existing_files: set[str])` that returns
-a function simulating `cached_file` — returns a fake path for files in the set, `None` otherwise.
-
-Test classes are grouped by class/function under test:
-
-| Test class | Count | Methods |
+| Group | Count | Methods |
 |---|---|---|
-| `TestDetectWeightFile` | 7 | `test_hf_single_exists`, `test_hf_index_exists`, `test_consolidated_single`, `test_consolidated_index`, `test_nothing_found`, `test_both_hf_and_consolidated`, `test_hf_index_and_consolidated_single` |
-| `TestGetConfigDict` | 6 | `test_prefers_config_json`, `test_falls_back_to_params_json`, `test_mistral_format_true_forces_params`, `test_mistral_format_false_errors`, `test_sets_loaded_from_mistral_format`, `test_sets_transformers_weights` |
-| `TestConfigToParamsJson` | 3 | `test_mistral`, `test_ministral3`, `test_mistral4` |
-| `TestConfigFromParamsJsonLocal` | 4 | `test_mistral`, `test_ministral3`, `test_mistral4`, `test_mistral3` |
+| `_detect_weight_file` | 7 | `test_detect_weight_file` (×7 parametrized) |
+| `get_config_dict` | 5 | `test_get_config_dict_prefers_config_json`, `test_get_config_dict_falls_back_to_params_json`, `test_get_config_dict_mistral_format_true_forces_params`, `test_get_config_dict_mistral_format_false_errors`, `test_get_config_dict_sets_transformers_weights` |
+| `_config_to_params_json` | 3 | `test_config_to_params_json` (×3 parametrized) |
+| `from_pretrained` | 4 | `test_from_pretrained` (×4 parametrized) |
 
-**Phase 4 total: 20 tests**
+### Test design
 
-### Implementation
+- **`test_detect_weight_file`**: Parametrized with 7 cases. Mocks `cached_file` to
+  control which files "exist". Asserts `None` when HF weights found or nothing found,
+  filename when consolidated found.
+- **`get_config_dict` tests**: Use `mistral_params` fixture and `tmp_path`. Assert
+  `isinstance(dict)` and `_loaded_from_mistral_format` presence/absence.
+- **`test_config_to_params_json`**: Parametrized over `(config_cls, params_fixture,
+  skip_keys)`. Loads from fixture via `from_pretrained`, roundtrips back, asserts
+  every fixture key is preserved. `Ministral3Config` skips `quantization` (FP8
+  doesn't roundtrip).
+- **`test_from_pretrained`**: Parametrized over `(config_cls, params_fixture)`. Builds
+  expected config via `config_cls.from_dict(...)` to match `from_pretrained` metadata.
+  Asserts full config equality.
 
-After tests are written and failing:
+### Shared test fixtures
 
-1. Create `src/transformers/integrations/mistral/config_format.py`:
-   - Constants: `_PARAMS_JSON = "params.json"`, `_CONSOLIDATED_SINGLE = "consolidated.safetensors"`, `_CONSOLIDATED_INDEX = "consolidated.safetensors.index.json"`, `_HF_SINGLE = "model.safetensors"`, `_HF_INDEX = "model.safetensors.index.json"`
-   - `MistralFormatConfig(PreTrainedConfig)` class:
-     - `get_config_dict(cls, pretrained_model_name_or_path, **kwargs)` classmethod:
-       - Pop `mistral_format` from kwargs
-       - If `mistral_format is not True`: try standard `config.json` via `super().get_config_dict()`
-       - If that fails (OSError) or `mistral_format is True`: try `_get_config_dict_from_params_json()`
-       - If `mistral_format is False` and `config.json` fails: re-raise
-     - `_get_config_dict_from_params_json(cls, path, **kwargs)` classmethod:
-       - `cached_file(path, "params.json")` → load JSON
-       - `native_config_for_model_type(cls.model_type, params_dict).to_hf_config().to_dict()` → config_dict
-       - `_detect_weight_file(path)` → set `transformers_weights`
-       - Set `_loaded_from_mistral_format = True`
-       - Return `(config_dict, kwargs)`
-     - `_detect_weight_file(cls, path, **kwargs)` classmethod:
-       - Probe in order: `_HF_SINGLE`, `_HF_INDEX` (→ return None if found), then `_CONSOLIDATED_INDEX`, `_CONSOLIDATED_SINGLE` (→ return filename if found)
-     - `_config_to_params_json(self)` method:
-       - `native = native_config_from_hf_config(self.model_type, self)`
-       - `dataclasses.asdict(native)` → params dict (with nested dataclasses serialized to dicts)
+**File**: `tests/integrations/mistral/conftest.py`
 
-2. Modify each config class to inherit from `MistralFormatConfig`:
-   - Add `from transformers.integrations.mistral.config_format import MistralFormatConfig`
-   - Change `class MistralConfig(PreTrainedConfig)` → `class MistralConfig(MistralFormatConfig)`
-   - Same for Ministral3Config, Mistral3Config, Mistral4Config
+Module-level constants (`MISTRAL_PARAMS`, etc.) and `@pytest.fixture(scope="session")`
+wrappers (`mistral_params`, etc.) returning `deepcopy` to prevent cross-test mutation.
+Pytest-style tests receive fixtures via argument injection; any remaining
+`unittest.TestCase` tests can import the constants directly.
 
-3. Update `src/transformers/integrations/mistral/__init__.py` exports to include `MistralFormatConfig`.
+### Key Design Decisions
+
+- **No torch dependency**: All config classes are pure Python. All Phase 4 tests run
+  without torch.
+- **`_detect_weight_file` returns `None`, never raises**: Two semantically different
+  `None` cases (HF weights found = no override needed; nothing found = weights may not
+  be present yet). Config loading should not fail when weights are absent.
+- **Lazy imports for circular dependency**: Only the two methods that call
+  `params_conversion` functions use lazy imports. Everything else is top-level.
+- **Pytest-style classes with fixtures**: All test classes are plain classes (not
+  `unittest.TestCase`). Fixtures injected via arguments. `@pytest.mark.parametrize`
+  for multi-variant tests with `request.getfixturevalue()` for fixture resolution.
 
 ---
 
@@ -708,9 +740,10 @@ tests/integrations/
     __init__.py
     mistral/
         __init__.py
+        conftest.py                # Shared fixture dicts (params.json-style)
         test_params_conversion.py  # Phase 1 tests (27 tests, pure Python)
-        test_weight_conversion.py  # Phase 2+3 tests (23 tests, @require_torch)
-        test_config_format.py      # Phase 4 tests (20 tests, mocked + local)
+        test_weight_conversion.py  # Phase 2+3 tests (15 tests, @require_torch)
+        test_config_format.py      # Phase 4 tests (19 tests, pure Python)
         test_integration.py        # Phase 5+6 tests (27 tests, @require_torch, tiny models)
         test_slow_integration.py   # Phase 7 tests (8 tests, @slow, real Hub models)
 ```
@@ -743,12 +776,12 @@ new package structure. Imports elsewhere need updating.
 
 | File | Unit | Integration | Slow | Total |
 |------|------|-------------|------|-------|
-| `test_params_conversion.py` | 27 | — | — | 27 |
+| `test_params_conversion.py` | 30 | — | — | 30 |
 | `test_weight_conversion.py` | 15 | — | — | 15 |
-| `test_config_format.py` | — | 20 | — | 20 |
+| `test_config_format.py` | — | 19 | — | 19 |
 | `test_integration.py` | — | 27 | — | 27 |
 | `test_slow_integration.py` | — | — | 8 | 8 |
-| **Total** | **42** | **47** | **8** | **97** |
+| **Total** | **45** | **46** | **8** | **99** |
 
 ---
 

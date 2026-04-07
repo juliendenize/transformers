@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from enum import Enum
 from typing import Generic, Literal, Self, TypeVar, overload
 
 from ...configuration_utils import PreTrainedConfig
@@ -32,16 +33,21 @@ from ...models.pixtral.configuration_pixtral import PixtralVisionConfig
 
 HFConfigT = TypeVar("HFConfigT", bound=PreTrainedConfig)
 
-MistralModelType = Literal["mistral", "ministral3", "mistral4", "mistral3"]
+
+class MistralModelType(str, Enum):
+    MISTRAL = "mistral"
+    MINISTRAL3 = "ministral3"
+    MISTRAL4 = "mistral4"
+    MISTRAL3 = "mistral3"
 
 
-def _detect_text_model_type(params: dict) -> Literal["mistral", "ministral3", "mistral4"]:
+def _detect_text_model_type(params: dict) -> MistralModelType:
     r"""Infer the text backbone model type from native `params.json` keys."""
     if "moe" in params:
-        return "mistral4"
+        return MistralModelType.MISTRAL4
     if "yarn" in params or "quantization" in params:
-        return "ministral3"
-    return "mistral"
+        return MistralModelType.MINISTRAL3
+    return MistralModelType.MISTRAL
 
 
 def _extract_rope_theta(config: PreTrainedConfig) -> float:
@@ -632,60 +638,68 @@ class Mistral3NativeConfig(NativeToHFConfigMixin[Mistral3Config]):
 
 
 @overload
-def native_config_for_model_type(model_type: Literal["mistral"], params: dict) -> MistralNativeConfig: ...
+def native_config_for_model_type(model_type: Literal[MistralModelType.MISTRAL], params: dict) -> MistralNativeConfig: ...
 @overload
-def native_config_for_model_type(model_type: Literal["ministral3"], params: dict) -> Ministral3NativeConfig: ...
+def native_config_for_model_type(model_type: Literal[MistralModelType.MINISTRAL3], params: dict) -> Ministral3NativeConfig: ...
 @overload
-def native_config_for_model_type(model_type: Literal["mistral4"], params: dict) -> Mistral4NativeConfig: ...
+def native_config_for_model_type(model_type: Literal[MistralModelType.MISTRAL4], params: dict) -> Mistral4NativeConfig: ...
 @overload
-def native_config_for_model_type(model_type: Literal["mistral3"], params: dict) -> Mistral3NativeConfig: ...
-
-
+def native_config_for_model_type(model_type: Literal[MistralModelType.MISTRAL3], params: dict) -> Mistral3NativeConfig: ...
 def native_config_for_model_type(
     model_type: MistralModelType, params: dict
 ) -> MistralNativeConfig | Ministral3NativeConfig | Mistral4NativeConfig | Mistral3NativeConfig:
     r"""Dispatch to the correct native config class by `model_type`."""
     match model_type:
-        case "mistral":
+        case MistralModelType.MISTRAL:
             return MistralNativeConfig.from_params_json(params)
-        case "ministral3":
+        case MistralModelType.MINISTRAL3:
             return Ministral3NativeConfig.from_params_json(params)
-        case "mistral4":
+        case MistralModelType.MISTRAL4:
             return Mistral4NativeConfig.from_params_json(params)
-        case "mistral3":
+        case MistralModelType.MISTRAL3:
             return Mistral3NativeConfig.from_params_json(params)
         case _:
             raise ValueError(f"Unknown model type: {model_type!r}")
 
 
 @overload
-def native_config_from_hf_config(model_type: Literal["mistral"], config: MistralConfig) -> MistralNativeConfig: ...
+def native_config_from_hf_config(
+    model_type: MistralModelType.MISTRAL, config: MistralConfig
+) -> MistralNativeConfig: ...
 @overload
 def native_config_from_hf_config(
-    model_type: Literal["ministral3"], config: Ministral3Config
+    model_type: MistralModelType.MINISTRAL3, config: Ministral3Config
 ) -> Ministral3NativeConfig: ...
 @overload
-def native_config_from_hf_config(model_type: Literal["mistral4"], config: Mistral4Config) -> Mistral4NativeConfig: ...
+def native_config_from_hf_config(
+    model_type: MistralModelType.MISTRAL4, config: Mistral4Config
+) -> Mistral4NativeConfig: ...
 @overload
-def native_config_from_hf_config(model_type: Literal["mistral3"], config: Mistral3Config) -> Mistral3NativeConfig: ...
+def native_config_from_hf_config(
+    model_type: MistralModelType.MISTRAL3, config: Mistral3Config
+) -> Mistral3NativeConfig: ...
+@overload
+def native_config_from_hf_config(
+    model_type: str, config: MistralConfig | Ministral3Config | Mistral4Config | Mistral3Config
+) -> MistralNativeConfig | Ministral3NativeConfig | Mistral4NativeConfig | Mistral3NativeConfig: ...
 
 
 def native_config_from_hf_config(
-    model_type: MistralModelType,
+    model_type: str,
     config: MistralConfig | Ministral3Config | Mistral4Config | Mistral3Config,
 ) -> MistralNativeConfig | Ministral3NativeConfig | Mistral4NativeConfig | Mistral3NativeConfig:
     r"""Reverse dispatch: HF config → native config."""
     match model_type:
-        case "mistral":
+        case MistralModelType.MISTRAL:
             assert isinstance(config, MistralConfig)
             return MistralNativeConfig.from_hf_config(config)
-        case "ministral3":
+        case MistralModelType.MINISTRAL3:
             assert isinstance(config, Ministral3Config)
             return Ministral3NativeConfig.from_hf_config(config)
-        case "mistral4":
+        case MistralModelType.MISTRAL4:
             assert isinstance(config, Mistral4Config)
             return Mistral4NativeConfig.from_hf_config(config)
-        case "mistral3":
+        case MistralModelType.MISTRAL3:
             assert isinstance(config, Mistral3Config)
             return Mistral3NativeConfig.from_hf_config(config)
         case _:
