@@ -638,13 +638,21 @@ class Mistral3NativeConfig(NativeToHFConfigMixin[Mistral3Config]):
 
 
 @overload
-def native_config_for_model_type(model_type: Literal[MistralModelType.MISTRAL], params: dict) -> MistralNativeConfig: ...
+def native_config_for_model_type(
+    model_type: Literal[MistralModelType.MISTRAL], params: dict
+) -> MistralNativeConfig: ...
 @overload
-def native_config_for_model_type(model_type: Literal[MistralModelType.MINISTRAL3], params: dict) -> Ministral3NativeConfig: ...
+def native_config_for_model_type(
+    model_type: Literal[MistralModelType.MINISTRAL3], params: dict
+) -> Ministral3NativeConfig: ...
 @overload
-def native_config_for_model_type(model_type: Literal[MistralModelType.MISTRAL4], params: dict) -> Mistral4NativeConfig: ...
+def native_config_for_model_type(
+    model_type: Literal[MistralModelType.MISTRAL4], params: dict
+) -> Mistral4NativeConfig: ...
 @overload
-def native_config_for_model_type(model_type: Literal[MistralModelType.MISTRAL3], params: dict) -> Mistral3NativeConfig: ...
+def native_config_for_model_type(
+    model_type: Literal[MistralModelType.MISTRAL3], params: dict
+) -> Mistral3NativeConfig: ...
 def native_config_for_model_type(
     model_type: MistralModelType, params: dict
 ) -> MistralNativeConfig | Ministral3NativeConfig | Mistral4NativeConfig | Mistral3NativeConfig:
@@ -664,28 +672,23 @@ def native_config_for_model_type(
 
 @overload
 def native_config_from_hf_config(
-    model_type: MistralModelType.MISTRAL, config: MistralConfig
+    model_type: Literal[MistralModelType.MISTRAL], config: MistralConfig
 ) -> MistralNativeConfig: ...
 @overload
 def native_config_from_hf_config(
-    model_type: MistralModelType.MINISTRAL3, config: Ministral3Config
+    model_type: Literal[MistralModelType.MINISTRAL3], config: Ministral3Config
 ) -> Ministral3NativeConfig: ...
 @overload
 def native_config_from_hf_config(
-    model_type: MistralModelType.MISTRAL4, config: Mistral4Config
+    model_type: Literal[MistralModelType.MISTRAL4], config: Mistral4Config
 ) -> Mistral4NativeConfig: ...
 @overload
 def native_config_from_hf_config(
-    model_type: MistralModelType.MISTRAL3, config: Mistral3Config
+    model_type: Literal[MistralModelType.MISTRAL3], config: Mistral3Config
 ) -> Mistral3NativeConfig: ...
-@overload
-def native_config_from_hf_config(
-    model_type: str, config: MistralConfig | Ministral3Config | Mistral4Config | Mistral3Config
-) -> MistralNativeConfig | Ministral3NativeConfig | Mistral4NativeConfig | Mistral3NativeConfig: ...
-
 
 def native_config_from_hf_config(
-    model_type: str,
+    model_type: MistralModelType,
     config: MistralConfig | Ministral3Config | Mistral4Config | Mistral3Config,
 ) -> MistralNativeConfig | Ministral3NativeConfig | Mistral4NativeConfig | Mistral3NativeConfig:
     r"""Reverse dispatch: HF config → native config."""

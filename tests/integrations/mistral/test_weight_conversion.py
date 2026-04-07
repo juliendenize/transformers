@@ -102,24 +102,25 @@ class TestMistralBaseRenamings(unittest.TestCase):
 
         q_conv, k_conv = converters
         # Q converter uses default "num_attention_heads"
+        # PermuteForRope.convert uses target_patterns[0] as the output key
         q_result = q_conv.operations[0].convert(
             input_dict={"attention.wq": [original.clone()]},
             source_patterns=["attention.wq"],
             target_patterns=["self_attn.q_proj"],
             config=FakeConfig(),
         )
-        permuted = q_result["attention.wq"][0]
+        permuted = q_result["self_attn.q_proj"][0]
         self.assertEqual(permuted.shape, original.shape)
         self.assertFalse(torch.equal(permuted, original))
 
-        # Applying the permutation twice with head_dim=4 is a self-inverse
-        double = q_conv.operations[0].convert(
-            input_dict={"attention.wq": [permuted]},
-            source_patterns=["attention.wq"],
-            target_patterns=["self_attn.q_proj"],
+        # Apply the inverse permutation to verify roundtrip
+        inv_result = q_conv.operations[0].reverse_op.convert(
+            input_dict={"self_attn.q_proj": [permuted]},
+            source_patterns=["self_attn.q_proj"],
+            target_patterns=["attention.wq"],
             config=FakeConfig(),
         )["attention.wq"][0]
-        torch.testing.assert_close(double, original)
+        torch.testing.assert_close(inv_result, original)
 
         # K converter uses "num_key_value_heads"
         k_result = k_conv.operations[0].convert(
@@ -128,7 +129,7 @@ class TestMistralBaseRenamings(unittest.TestCase):
             target_patterns=["self_attn.k_proj"],
             config=FakeConfig(),
         )
-        k_permuted = k_result["attention.wk"][0]
+        k_permuted = k_result["self_attn.k_proj"][0]
         self.assertFalse(torch.equal(k_permuted, original))
 
 

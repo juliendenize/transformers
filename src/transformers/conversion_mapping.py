@@ -71,7 +71,6 @@ _MODEL_TO_CONVERSION_PATTERN = {
     "llava_next_video": "llava_next",
     "llava_onevision": "llava_next",
     "vipllava": "llava",
-    "mistral3": "llava",
     "qwen2_5_vl": "qwen2_vl",
     "sam3_tracker_video": "sam3_tracker",
     "pp_chart2table": "llava",
@@ -790,6 +789,33 @@ def _build_checkpoint_conversion_mapping():
         WeightRenaming("mlp.experts.e_score_correction_bias", "mlp.gate.e_score_correction_bias"),
         WeightRenaming("mlp.shared_expert.", "mlp.shared_experts."),
     ]
+
+    # Lazy import to avoid circular dependencies with core_model_loading
+    from .integrations.mistral.weight_conversion import (
+        fp8_scale_renamings,
+        mistral3_native_text_converters,
+        mistral3_native_text_renamings,
+        mistral3_native_vision_converters,
+        mistral3_native_vision_renamings,
+        mistral4_native_converters,
+        mistral4_native_renamings,
+        mistral_base_native_converters,
+        mistral_base_native_renamings,
+    )
+
+    mapping["mistral"] = mistral_base_native_renamings() + mistral_base_native_converters()
+    mapping["ministral3"] = mistral_base_native_renamings() + mistral_base_native_converters() + fp8_scale_renamings()
+
+    mapping["mistral3"] = (
+        mapping["llava"].copy()
+        + mistral3_native_text_renamings()
+        + mistral3_native_text_converters()
+        + mistral3_native_vision_renamings()
+        + mistral3_native_vision_converters()
+        + fp8_scale_renamings()
+    )
+
+    mapping["mistral4"] = mistral4_native_renamings() + fp8_scale_renamings() + mistral4_native_converters()
 
     for model_type, base_pattern in _MODEL_TO_CONVERSION_PATTERN.items():
         if model_type in mapping:

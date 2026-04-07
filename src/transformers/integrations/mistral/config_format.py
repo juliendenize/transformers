@@ -90,14 +90,19 @@ class MistralFormatConfig(PreTrainedConfig):
         """
         from .params_conversion import native_config_for_model_type  # lazy: avoid circular import
 
-        cache_dir = kwargs.get("cache_dir")
-        force_download = kwargs.get("force_download", False)
-        proxies = kwargs.get("proxies")
-        token = kwargs.get("token")
-        local_files_only = kwargs.get("local_files_only", False)
-        revision = kwargs.get("revision")
-        subfolder = kwargs.get("subfolder", "")
-        commit_hash = kwargs.get("_commit_hash")
+        # Pop the same kwargs that PreTrainedConfig._get_config_dict pops,
+        # so they don't leak through to model_kwargs in from_pretrained.
+        cache_dir = kwargs.pop("cache_dir", None)
+        force_download = kwargs.pop("force_download", False)
+        proxies = kwargs.pop("proxies", None)
+        token = kwargs.pop("token", None)
+        local_files_only = kwargs.pop("local_files_only", False)
+        revision = kwargs.pop("revision", None)
+        subfolder = kwargs.pop("subfolder", "")
+        commit_hash = kwargs.pop("_commit_hash", None)
+        kwargs.pop("trust_remote_code", None)
+        kwargs.pop("_from_pipeline", None)
+        kwargs.pop("_from_auto", None)
 
         resolved_params_file = cached_file(
             pretrained_model_name_or_path,

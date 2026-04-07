@@ -1148,6 +1148,49 @@ class EmbeddingAccessMixin:
             self.lm_head = new_embeddings
 
 
+def _save_native_mistral_format(
+    save_directory: str | os.PathLike,
+    config,
+    index: dict | None,
+    variant: str | None,
+) -> None:
+    r"""Rename HF weight files to native Mistral names and write ``params.json``."""
+    save_directory = str(save_directory)
+
+    # Rename model.safetensors → consolidated.safetensors (single shard)
+    hf_single = os.path.join(save_directory, _add_variant(SAFE_WEIGHTS_NAME, variant))
+    consolidated_single = os.path.join(save_directory, "consolidated.safetensors")
+    if os.path.isfile(hf_single):
+        os.rename(hf_single, consolidated_single)
+
+    # Rename sharded files: model-00001-of-00005.safetensors → consolidated-00001-of-00005.safetensors
+    if index is not None:
+        new_weight_map = {}
+        for param_name, shard_file in index["weight_map"].items():
+            new_shard = shard_file.replace("model", "consolidated")
+            new_weight_map[param_name] = new_shard
+            src = os.path.join(save_directory, shard_file)
+            dst = os.path.join(save_directory, new_shard)
+            if os.path.isfile(src) and src != dst:
+                os.rename(src, dst)
+        index["weight_map"] = new_weight_map
+
+        # Rewrite index file
+        hf_index_name = os.path.join(save_directory, _add_variant(SAFE_WEIGHTS_INDEX_NAME, variant))
+        consolidated_index = os.path.join(save_directory, "consolidated.safetensors.index.json")
+        if os.path.isfile(hf_index_name):
+            os.remove(hf_index_name)
+        with open(consolidated_index, "w", encoding="utf-8") as f:
+            content = json.dumps(index, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+            f.write(content)
+
+    # Write params.json if the config supports it
+    if hasattr(config, "_config_to_params_json"):
+        params = config._config_to_params_json()
+        with open(os.path.join(save_directory, "params.json"), "w", encoding="utf-8") as f:
+            json.dump(params, f, indent=2, ensure_ascii=False)
+
+
 class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToHubMixin, PeftAdapterMixin):
     r"""
     Base class for all models.
@@ -3242,6 +3285,11 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
         """
         return any(hasattr(m, "gradient_checkpointing") and m.gradient_checkpointing for m in self.modules())
 
+    @staticmethod
+    def _save_native_mistral_format(save_directory, config, index, variant):
+        r"""Rename model.safetensors → consolidated.safetensors and write params.json."""
+        _save_native_mistral_format(save_directory, config, index, variant)
+
     def save_pretrained(
         self,
         save_directory: str | os.PathLike,
@@ -3253,6 +3301,7 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
         token: str | bool | None = None,
         save_peft_format: bool = True,
         save_original_format: bool = True,
+        save_format: str | None = None,
         **kwargs,
     ):
         """
@@ -3298,9 +3347,15 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
                 For backward compatibility with the previous versions of `transformers` you can save the checkpoint with
                 its reverse mapping. The reverse mapping needs to exists even if the model was loaded from a None legacy
                 checkpoint.
+            save_format (`str`, *optional*):
+                Override the save format. Supported values: ``"hf"`` (always save with HF key names),
+                ``"mistral"`` (save with native Mistral key names + ``params.json``). When ``None`` (default),
+                saves with whatever format the model was loaded in.
             kwargs (`dict[str, Any]`, *optional*):
                 Additional key word arguments passed along to the [`~utils.PushToHubMixin.push_to_hub`] method.
         """
+        if save_format is not None and save_format not in ("hf", "mistral"):
+            raise ValueError(f"Unknown save_format={save_format!r}. Supported values: 'hf', 'mistral'.")
         if token is not None:
             kwargs["token"] = token
 
@@ -3428,7 +3483,10 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
         state_dict = remove_tied_weights_from_state_dict(state_dict, model_to_save)
 
         # Revert all renaming and/or weight operations
-        if save_original_format and not _hf_peft_config_loaded:
+        # save_format="hf" forces HF key names (skip revert), save_format="mistral" forces native keys
+        if save_format == "hf":
+            pass  # Keep HF key names, no revert
+        elif save_original_format and not _hf_peft_config_loaded:
             state_dict = revert_weight_conversion(model_to_save, state_dict)
 
         # Shard the model if it is too big.
@@ -3511,6 +3569,10 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
                 f"split in {len(state_dict_split.filename_to_tensors)} checkpoint shards. You can find where each parameters has been saved in the "
                 f"index located at {save_index_file}."
             )
+
+        # Handle native Mistral format: rename files and write params.json
+        if save_format == "mistral":
+            _save_native_mistral_format(save_directory, self.config, index, variant)
 
         if push_to_hub:
             # Eventually create an empty model card
