@@ -14,8 +14,9 @@
 r"""Tests for Phase 5+6: from_pretrained pipeline, save_pretrained native format, and roundtrips."""
 
 import json
-import unittest
 from pathlib import Path
+
+import pytest
 
 from transformers.testing_utils import require_torch
 
@@ -308,15 +309,15 @@ def _build_native_mistral4_checkpoint(tmpdir: Path) -> "Mistral4Config":
 
 
 @require_torch
-class TestConversionMappingRegistration(unittest.TestCase):
+class TestConversionMappingRegistration:
     r"""Verify that all Mistral model types are registered in the conversion mapping."""
 
     def _assert_has_entries(self, model_type: str) -> None:
         mapping = get_checkpoint_conversion_mapping(model_type)
-        self.assertIsNotNone(mapping, f"No conversion mapping for {model_type!r}")
-        self.assertTrue(len(mapping) > 0, f"Empty conversion mapping for {model_type!r}")
+        assert mapping is not None, f"No conversion mapping for {model_type!r}"
+        assert len(mapping) > 0, f"Empty conversion mapping for {model_type!r}"
         has_renaming = any(isinstance(e, WeightRenaming) for e in mapping)
-        self.assertTrue(has_renaming, f"No WeightRenaming entries for {model_type!r}")
+        assert has_renaming, f"No WeightRenaming entries for {model_type!r}"
 
     def test_mistral(self):
         self._assert_has_entries("mistral")
@@ -326,129 +327,107 @@ class TestConversionMappingRegistration(unittest.TestCase):
 
     def test_mistral4(self):
         mapping = get_checkpoint_conversion_mapping("mistral4")
-        self.assertIsNotNone(mapping)
+        assert mapping is not None
         has_converter = any(isinstance(e, WeightConverter) for e in mapping)
-        self.assertTrue(has_converter, "mistral4 should have WeightConverter entries for MoE expert fusion")
+        assert has_converter, "mistral4 should have WeightConverter entries for MoE expert fusion"
 
 
 @require_torch
-class TestMistralFromPretrained(unittest.TestCase):
+class TestMistralFromPretrained:
     r"""End-to-end from_pretrained tests with tiny native Mistral checkpoints."""
 
-    def test_native_format(self):
+    def test_native_format(self, tmp_path):
         r"""Loading from native format produces a valid model."""
-        import tempfile
+        _build_native_mistral_checkpoint(tmp_path)
+        model = MistralForCausalLM.from_pretrained(tmp_path, mistral_format=True)
+        assert isinstance(model, MistralForCausalLM)
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _build_native_mistral_checkpoint(Path(tmpdir))
-            model = MistralForCausalLM.from_pretrained(tmpdir, mistral_format=True)
-        self.assertIsInstance(model, MistralForCausalLM)
-
-    def test_native_weights_match(self):
+    def test_native_weights_match(self, tmp_path):
         r"""Weights loaded from native format match the original HF model weights."""
-        import tempfile
-
         config = _tiny_mistral_config()
         with torch.device("meta"):
             ref_model = MistralForCausalLM(config)
         ref_sd = {name: torch.randn(param.shape) for name, param in ref_model.named_parameters()}
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = Path(tmpdir)
-            # Build native checkpoint from the reference state dict
-            native_sd: dict[str, torch.Tensor] = {}
-            for hf_key, tensor in ref_sd.items():
-                native_key = _hf_to_native_key(hf_key)
-                if "attention.wq.weight" in native_key:
-                    tensor = _inverse_rope_permute(tensor, _TINY_HEADS)
-                elif "attention.wk.weight" in native_key:
-                    tensor = _inverse_rope_permute(tensor, _TINY_KV_HEADS)
-                native_sd[native_key] = tensor.clone()
+        # Build native checkpoint from the reference state dict
+        native_sd: dict[str, torch.Tensor] = {}
+        for hf_key, tensor in ref_sd.items():
+            native_key = _hf_to_native_key(hf_key)
+            if "attention.wq.weight" in native_key:
+                tensor = _inverse_rope_permute(tensor, _TINY_HEADS)
+            elif "attention.wk.weight" in native_key:
+                tensor = _inverse_rope_permute(tensor, _TINY_KV_HEADS)
+            native_sd[native_key] = tensor.clone()
 
-            save_file(native_sd, str(tmpdir / "consolidated.safetensors"))
-            params = {
-                "dim": _TINY_HIDDEN,
-                "n_layers": _TINY_LAYERS,
-                "hidden_dim": _TINY_INTERMEDIATE,
-                "n_heads": _TINY_HEADS,
-                "n_kv_heads": _TINY_KV_HEADS,
-                "norm_eps": 1e-5,
-                "head_dim": _TINY_HEAD_DIM,
-                "vocab_size": _TINY_VOCAB,
-                "max_position_embeddings": 64,
-                "rope_theta": 10000.0,
-            }
-            with open(tmpdir / "params.json", "w", encoding="utf-8") as f:
-                json.dump(params, f, ensure_ascii=False)
+        save_file(native_sd, str(tmp_path / "consolidated.safetensors"))
+        params = {
+            "dim": _TINY_HIDDEN,
+            "n_layers": _TINY_LAYERS,
+            "hidden_dim": _TINY_INTERMEDIATE,
+            "n_heads": _TINY_HEADS,
+            "n_kv_heads": _TINY_KV_HEADS,
+            "norm_eps": 1e-5,
+            "head_dim": _TINY_HEAD_DIM,
+            "vocab_size": _TINY_VOCAB,
+            "max_position_embeddings": 64,
+            "rope_theta": 10000.0,
+        }
+        with open(tmp_path / "params.json", "w", encoding="utf-8") as f:
+            json.dump(params, f, ensure_ascii=False)
 
-            # Write config.json for adjust_generation_fn fallback
-            config.save_pretrained(str(tmpdir))
+        # Write config.json for adjust_generation_fn fallback
+        config.save_pretrained(str(tmp_path))
 
-            model = MistralForCausalLM.from_pretrained(str(tmpdir), mistral_format=True)
+        model = MistralForCausalLM.from_pretrained(str(tmp_path), mistral_format=True)
 
         loaded_sd = model.state_dict()
         for key in ref_sd:
-            self.assertTrue(
-                torch.allclose(loaded_sd[key], ref_sd[key], atol=1e-6),
-                f"Weight mismatch for {key}",
-            )
+            assert torch.allclose(loaded_sd[key], ref_sd[key], atol=1e-6), f"Weight mismatch for {key}"
 
-    def test_hf_save_reload_roundtrip(self):
+    def test_hf_save_reload_roundtrip(self, tmp_path):
         r"""Load native → save → reload produces identical weights.
 
         `save_pretrained` applies `revert_weight_conversion`, saving weights
         with native keys. Reloading re-applies the forward conversion mapping
         (registered for model type `"mistral"`), restoring HF key names.
         """
-        import tempfile
+        native_dir = tmp_path / "native"
+        native_dir.mkdir()
+        save_dir = tmp_path / "saved"
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = Path(tmpdir)
-            native_dir = tmpdir / "native"
-            native_dir.mkdir()
-            save_dir = tmpdir / "saved"
+        _build_native_mistral_checkpoint(native_dir)
+        model = MistralForCausalLM.from_pretrained(str(native_dir), mistral_format=True)
+        original_sd = {k: v.clone() for k, v in model.state_dict().items()}
 
-            _build_native_mistral_checkpoint(native_dir)
-            model = MistralForCausalLM.from_pretrained(str(native_dir), mistral_format=True)
-            original_sd = {k: v.clone() for k, v in model.state_dict().items()}
-
-            model.save_pretrained(str(save_dir))
-            # Saved dir has config.json + model.safetensors (with native keys).
-            # Reloading applies the conversion mapping automatically.
-            reloaded = MistralForCausalLM.from_pretrained(str(save_dir))
-            reloaded_sd = reloaded.state_dict()
+        model.save_pretrained(str(save_dir))
+        # Saved dir has config.json + model.safetensors (with native keys).
+        # Reloading applies the conversion mapping automatically.
+        reloaded = MistralForCausalLM.from_pretrained(str(save_dir))
+        reloaded_sd = reloaded.state_dict()
 
         for key in original_sd:
-            self.assertTrue(
-                torch.equal(original_sd[key], reloaded_sd[key]),
-                f"Roundtrip mismatch for {key}",
-            )
+            assert torch.equal(original_sd[key], reloaded_sd[key]), f"Roundtrip mismatch for {key}"
 
-    def test_native_weight_conversion_keys_correct(self):
+    def test_native_weight_conversion_keys_correct(self, tmp_path):
         r"""All expected HF state dict keys are present after loading from native format."""
-        import tempfile
-
         config = _tiny_mistral_config()
         with torch.device("meta"):
             ref_model = MistralForCausalLM(config)
         expected_keys = set(ref_model.state_dict().keys())
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _build_native_mistral_checkpoint(Path(tmpdir))
-            model = MistralForCausalLM.from_pretrained(tmpdir, mistral_format=True)
+        _build_native_mistral_checkpoint(tmp_path)
+        model = MistralForCausalLM.from_pretrained(tmp_path, mistral_format=True)
 
         actual_keys = set(model.state_dict().keys())
-        self.assertEqual(expected_keys, actual_keys)
+        assert expected_keys == actual_keys
 
 
 @require_torch
-class TestMinistral3FromPretrained(unittest.TestCase):
+class TestMinistral3FromPretrained:
     r"""Ministral3 uses the same weight layout as base Mistral (with FP8 scales for quantized models)."""
 
-    def test_native_format(self):
+    def test_native_format(self, tmp_path):
         r"""Loading a tiny Ministral3 native checkpoint succeeds."""
-        import tempfile
-
         config = Ministral3Config(
             hidden_size=_TINY_HIDDEN,
             num_hidden_layers=_TINY_LAYERS,
@@ -472,125 +451,98 @@ class TestMinistral3FromPretrained(unittest.TestCase):
                 tensor = _inverse_rope_permute(tensor, _TINY_KV_HEADS)
             native_sd[native_key] = tensor
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = Path(tmpdir)
-            save_file(native_sd, str(tmpdir / "consolidated.safetensors"))
-            params = {
-                "dim": _TINY_HIDDEN,
-                "n_layers": _TINY_LAYERS,
-                "hidden_dim": _TINY_INTERMEDIATE,
-                "n_heads": _TINY_HEADS,
-                "n_kv_heads": _TINY_KV_HEADS,
-                "norm_eps": 1e-5,
-                "head_dim": _TINY_HEAD_DIM,
-                "vocab_size": _TINY_VOCAB,
-                "max_position_embeddings": 64,
-                "rope_theta": 10000.0,
-            }
-            with open(tmpdir / "params.json", "w", encoding="utf-8") as f:
-                json.dump(params, f, ensure_ascii=False)
+        save_file(native_sd, str(tmp_path / "consolidated.safetensors"))
+        params = {
+            "dim": _TINY_HIDDEN,
+            "n_layers": _TINY_LAYERS,
+            "hidden_dim": _TINY_INTERMEDIATE,
+            "n_heads": _TINY_HEADS,
+            "n_kv_heads": _TINY_KV_HEADS,
+            "norm_eps": 1e-5,
+            "head_dim": _TINY_HEAD_DIM,
+            "vocab_size": _TINY_VOCAB,
+            "max_position_embeddings": 64,
+            "rope_theta": 10000.0,
+        }
+        with open(tmp_path / "params.json", "w", encoding="utf-8") as f:
+            json.dump(params, f, ensure_ascii=False)
 
-            # Write config.json for adjust_generation_fn fallback
-            config.save_pretrained(str(tmpdir))
+        # Write config.json for adjust_generation_fn fallback
+        config.save_pretrained(str(tmp_path))
 
-            loaded = Ministral3ForCausalLM.from_pretrained(str(tmpdir), mistral_format=True)
+        loaded = Ministral3ForCausalLM.from_pretrained(str(tmp_path), mistral_format=True)
 
-        self.assertIsInstance(loaded, Ministral3ForCausalLM)
+        assert isinstance(loaded, Ministral3ForCausalLM)
         loaded_sd = loaded.state_dict()
         for key in hf_sd:
-            self.assertTrue(
-                torch.allclose(loaded_sd[key], hf_sd[key], atol=1e-6),
-                f"Weight mismatch for {key}",
-            )
+            assert torch.allclose(loaded_sd[key], hf_sd[key], atol=1e-6), f"Weight mismatch for {key}"
 
 
 @require_torch
-class TestMistral4FromPretrained(unittest.TestCase):
+class TestMistral4FromPretrained:
     r"""End-to-end from_pretrained tests with tiny native Mistral4 (MoE/MLA) checkpoints."""
 
-    def test_native_format(self):
+    def test_native_format(self, tmp_path):
         r"""Loading from native Mistral4 format produces a valid model."""
-        import tempfile
+        _build_native_mistral4_checkpoint(tmp_path)
+        model = Mistral4ForCausalLM.from_pretrained(tmp_path, mistral_format=True)
+        assert isinstance(model, Mistral4ForCausalLM)
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _build_native_mistral4_checkpoint(Path(tmpdir))
-            model = Mistral4ForCausalLM.from_pretrained(tmpdir, mistral_format=True)
-        self.assertIsInstance(model, Mistral4ForCausalLM)
-
-    def test_hf_save_reload_roundtrip(self):
+    def test_hf_save_reload_roundtrip(self, tmp_path):
         r"""Load native Mistral4 → save HF → reload produces identical weights."""
-        import tempfile
+        native_dir = tmp_path / "native"
+        native_dir.mkdir()
+        hf_dir = tmp_path / "hf"
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = Path(tmpdir)
-            native_dir = tmpdir / "native"
-            native_dir.mkdir()
-            hf_dir = tmpdir / "hf"
+        _build_native_mistral4_checkpoint(native_dir)
+        model = Mistral4ForCausalLM.from_pretrained(str(native_dir), mistral_format=True)
+        original_sd = {k: v.clone() for k, v in model.state_dict().items()}
 
-            _build_native_mistral4_checkpoint(native_dir)
-            model = Mistral4ForCausalLM.from_pretrained(str(native_dir), mistral_format=True)
-            original_sd = {k: v.clone() for k, v in model.state_dict().items()}
-
-            model.save_pretrained(str(hf_dir))
-            reloaded = Mistral4ForCausalLM.from_pretrained(str(hf_dir))
-            reloaded_sd = reloaded.state_dict()
+        model.save_pretrained(str(hf_dir))
+        reloaded = Mistral4ForCausalLM.from_pretrained(str(hf_dir))
+        reloaded_sd = reloaded.state_dict()
 
         for key in original_sd:
-            self.assertTrue(
-                torch.equal(original_sd[key], reloaded_sd[key]),
-                f"Roundtrip mismatch for {key}",
-            )
+            assert torch.equal(original_sd[key], reloaded_sd[key]), f"Roundtrip mismatch for {key}"
 
 
 @require_torch
-class TestFromPretrainedFormatSelection(unittest.TestCase):
+class TestFromPretrainedFormatSelection:
     r"""Verify format selection logic: HF preferred, mistral_format overrides."""
 
-    def test_prefers_hf_when_both_exist(self):
+    def test_prefers_hf_when_both_exist(self, tmp_path):
         r"""When both config.json and params.json exist, HF format is preferred."""
-        import tempfile
+        _build_native_mistral_checkpoint(tmp_path)
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = Path(tmpdir)
-            _build_native_mistral_checkpoint(tmpdir)
+        # Also save HF format — the HF one should be preferred
+        hf_config = _tiny_mistral_config()
+        hf_config.save_pretrained(str(tmp_path))
 
-            # Also save HF format — the HF one should be preferred
-            hf_config = _tiny_mistral_config()
-            hf_config.save_pretrained(str(tmpdir))
+        loaded_config = MistralConfig.from_pretrained(str(tmp_path))
+        # When loaded from HF, _loaded_from_mistral_format should not be set
+        assert not getattr(loaded_config, "_loaded_from_mistral_format", False)
 
-            loaded_config = MistralConfig.from_pretrained(str(tmpdir))
-            # When loaded from HF, _loaded_from_mistral_format should not be set
-            self.assertFalse(getattr(loaded_config, "_loaded_from_mistral_format", False))
-
-    def test_mistral_format_true(self):
+    def test_mistral_format_true(self, tmp_path):
         r"""mistral_format=True forces native format loading."""
-        import tempfile
+        _build_native_mistral_checkpoint(tmp_path)
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = Path(tmpdir)
-            _build_native_mistral_checkpoint(tmpdir)
+        # Also save HF format
+        hf_config = _tiny_mistral_config()
+        hf_config.save_pretrained(str(tmp_path))
 
-            # Also save HF format
-            hf_config = _tiny_mistral_config()
-            hf_config.save_pretrained(str(tmpdir))
+        loaded_config = MistralConfig.from_pretrained(str(tmp_path), mistral_format=True)
+        assert getattr(loaded_config, "_loaded_from_mistral_format", False)
 
-            loaded_config = MistralConfig.from_pretrained(str(tmpdir), mistral_format=True)
-            self.assertTrue(getattr(loaded_config, "_loaded_from_mistral_format", False))
-
-    def test_mistral_format_false_no_hf(self):
+    def test_mistral_format_false_no_hf(self, tmp_path):
         r"""mistral_format=False without HF config raises."""
-        import tempfile
+        _build_native_mistral_checkpoint(tmp_path)
+        # Remove config.json if it was created
+        config_json = tmp_path / "config.json"
+        if config_json.exists():
+            config_json.unlink()
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = Path(tmpdir)
-            _build_native_mistral_checkpoint(tmpdir)
-            # Remove config.json if it was created
-            config_json = tmpdir / "config.json"
-            if config_json.exists():
-                config_json.unlink()
-
-            with self.assertRaises(OSError):
-                MistralConfig.from_pretrained(str(tmpdir), mistral_format=False)
+        with pytest.raises(OSError):
+            MistralConfig.from_pretrained(str(tmp_path), mistral_format=False)
 
 
 # ---------------------------------------------------------------------------
@@ -599,328 +551,266 @@ class TestFromPretrainedFormatSelection(unittest.TestCase):
 
 
 @require_torch
-class TestRevertWeightConversion(unittest.TestCase):
+class TestRevertWeightConversion:
     r"""Verify revert_weight_conversion produces correct concrete key names."""
 
-    def test_no_regex_keys(self):
+    def test_no_regex_keys(self, tmp_path):
         r"""Reverted state dict keys must not contain regex escapes like backslash-dot."""
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _build_native_mistral_checkpoint(Path(tmpdir))
-            model = MistralForCausalLM.from_pretrained(tmpdir, mistral_format=True)
+        _build_native_mistral_checkpoint(tmp_path)
+        model = MistralForCausalLM.from_pretrained(tmp_path, mistral_format=True)
 
         sd = model.state_dict()
         reverted = revert_weight_conversion(model, sd)
 
         for key in reverted:
-            self.assertNotIn("\\", key, f"Reverted key {key!r} contains regex escapes")
+            assert "\\" not in key, f"Reverted key {key!r} contains regex escapes"
 
-    def test_roundtrip(self):
+    def test_roundtrip(self, tmp_path):
         r"""Revert then forward conversion produces identical weights."""
-        import tempfile
+        native_dir = tmp_path / "native"
+        native_dir.mkdir()
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _build_native_mistral_checkpoint(Path(tmpdir))
-            model = MistralForCausalLM.from_pretrained(tmpdir, mistral_format=True)
+        _build_native_mistral_checkpoint(native_dir)
+        model = MistralForCausalLM.from_pretrained(str(native_dir), mistral_format=True)
 
         original_sd = {k: v.clone() for k, v in model.state_dict().items()}
         reverted = revert_weight_conversion(model, model.state_dict())
 
         # All reverted keys should be native format
         for key in reverted:
-            self.assertFalse(key.startswith("model."), f"Reverted key {key!r} still has HF prefix")
+            assert not key.startswith("model."), f"Reverted key {key!r} still has HF prefix"
 
         # Now save with reverted keys and reload
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = Path(tmpdir)
-            save_file(reverted, str(tmpdir / "model.safetensors"))
-            model.config.save_pretrained(str(tmpdir))
-            reloaded = MistralForCausalLM.from_pretrained(str(tmpdir))
+        save_dir = tmp_path / "saved"
+        save_dir.mkdir()
+        save_file(reverted, str(save_dir / "model.safetensors"))
+        model.config.save_pretrained(str(save_dir))
+        reloaded = MistralForCausalLM.from_pretrained(str(save_dir))
 
         for key in original_sd:
-            self.assertTrue(
-                torch.equal(original_sd[key], reloaded.state_dict()[key]),
-                f"Roundtrip mismatch for {key}",
-            )
+            assert torch.equal(original_sd[key], reloaded.state_dict()[key]), f"Roundtrip mismatch for {key}"
 
-    def test_returns_all_keys(self):
+    def test_returns_all_keys(self, tmp_path):
         r"""Reverted state dict has the same number of keys as the original."""
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _build_native_mistral_checkpoint(Path(tmpdir))
-            model = MistralForCausalLM.from_pretrained(tmpdir, mistral_format=True)
+        _build_native_mistral_checkpoint(tmp_path)
+        model = MistralForCausalLM.from_pretrained(tmp_path, mistral_format=True)
 
         sd = model.state_dict()
         reverted = revert_weight_conversion(model, sd)
-        self.assertEqual(len(sd), len(reverted))
+        assert len(sd) == len(reverted)
 
 
 @require_torch
-class TestSavePretrained(unittest.TestCase):
+class TestSavePretrained:
     r"""Verify save_pretrained save_format parameter behavior."""
 
-    def test_default_hf_format(self):
+    def test_default_hf_format(self, tmp_path):
         r"""Model created directly (not from native) saves as HF format by default."""
-        import tempfile
-
         config = _tiny_mistral_config()
         model = MistralForCausalLM(config)
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            model.save_pretrained(tmpdir)
-            self.assertTrue((Path(tmpdir) / "config.json").exists())
-            self.assertFalse((Path(tmpdir) / "params.json").exists())
+        model.save_pretrained(tmp_path)
+        assert (tmp_path / "config.json").exists()
+        assert not (tmp_path / "params.json").exists()
 
-    def test_default_preserves_native_format(self):
+    def test_default_preserves_native_format(self, tmp_path):
         r"""Model loaded from native format saves with native keys by default."""
-        import tempfile
+        native_dir = tmp_path / "native"
+        native_dir.mkdir()
+        save_dir = tmp_path / "saved"
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = Path(tmpdir)
-            native_dir = tmpdir / "native"
-            native_dir.mkdir()
-            save_dir = tmpdir / "saved"
+        _build_native_mistral_checkpoint(native_dir)
+        model = MistralForCausalLM.from_pretrained(str(native_dir), mistral_format=True)
+        model.save_pretrained(str(save_dir))
 
-            _build_native_mistral_checkpoint(native_dir)
-            model = MistralForCausalLM.from_pretrained(str(native_dir), mistral_format=True)
-            model.save_pretrained(str(save_dir))
+        from safetensors.torch import load_file
 
-            from safetensors.torch import load_file
+        saved_sd = load_file(str(save_dir / "model.safetensors"))
 
-            saved_sd = load_file(str(save_dir / "model.safetensors"))
+        # Native format keys should be present (e.g. "output.weight", not "lm_head.weight")
+        assert "output.weight" in saved_sd
+        assert "lm_head.weight" not in saved_sd
 
-            # Native format keys should be present (e.g. "output.weight", not "lm_head.weight")
-            self.assertIn("output.weight", saved_sd)
-            self.assertNotIn("lm_head.weight", saved_sd)
-
-    def test_force_hf(self):
+    def test_force_hf(self, tmp_path):
         r"""save_format='hf' saves with HF keys even if loaded from native."""
-        import tempfile
+        native_dir = tmp_path / "native"
+        native_dir.mkdir()
+        save_dir = tmp_path / "saved"
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = Path(tmpdir)
-            native_dir = tmpdir / "native"
-            native_dir.mkdir()
-            save_dir = tmpdir / "saved"
+        _build_native_mistral_checkpoint(native_dir)
+        model = MistralForCausalLM.from_pretrained(str(native_dir), mistral_format=True)
+        model.save_pretrained(str(save_dir), save_format="hf")
 
-            _build_native_mistral_checkpoint(native_dir)
-            model = MistralForCausalLM.from_pretrained(str(native_dir), mistral_format=True)
-            model.save_pretrained(str(save_dir), save_format="hf")
+        from safetensors.torch import load_file
 
-            from safetensors.torch import load_file
+        saved_sd = load_file(str(save_dir / "model.safetensors"))
+        assert "lm_head.weight" in saved_sd
+        assert "output.weight" not in saved_sd
 
-            saved_sd = load_file(str(save_dir / "model.safetensors"))
-            self.assertIn("lm_head.weight", saved_sd)
-            self.assertNotIn("output.weight", saved_sd)
-
-    def test_force_mistral(self):
+    def test_force_mistral(self, tmp_path):
         r"""save_format='mistral' saves params.json alongside native weights."""
-        import tempfile
-
         config = _tiny_mistral_config()
         model = MistralForCausalLM(config)
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            model.save_pretrained(tmpdir, save_format="mistral")
-            self.assertTrue((Path(tmpdir) / "params.json").exists())
-            self.assertTrue((Path(tmpdir) / "consolidated.safetensors").exists())
+        model.save_pretrained(tmp_path, save_format="mistral")
+        assert (tmp_path / "params.json").exists()
+        assert (tmp_path / "consolidated.safetensors").exists()
 
-    def test_invalid_save_format_raises(self):
+    def test_invalid_save_format_raises(self, tmp_path):
         r"""Unknown save_format raises ValueError."""
-        import tempfile
-
         config = _tiny_mistral_config()
         model = MistralForCausalLM(config)
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with self.assertRaises(ValueError):
-                model.save_pretrained(tmpdir, save_format="invalid")
+        with pytest.raises(ValueError):
+            model.save_pretrained(tmp_path, save_format="invalid")
 
 
 @require_torch
-class TestMistralSaveLoadRoundtrip(unittest.TestCase):
+class TestMistralSaveLoadRoundtrip:
     r"""Full roundtrip tests: native → HF → native and HF → native → HF."""
 
-    def test_native_to_hf_to_native(self):
+    def test_native_to_hf_to_native(self, tmp_path):
         r"""Native → load → save HF → reload → save native → reload produces identical weights."""
-        import tempfile
+        native_dir = tmp_path / "native"
+        native_dir.mkdir()
+        hf_dir = tmp_path / "hf"
+        native2_dir = tmp_path / "native2"
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = Path(tmpdir)
-            native_dir = tmpdir / "native"
-            native_dir.mkdir()
-            hf_dir = tmpdir / "hf"
-            native2_dir = tmpdir / "native2"
+        _build_native_mistral_checkpoint(native_dir)
+        model = MistralForCausalLM.from_pretrained(str(native_dir), mistral_format=True)
+        original_sd = {k: v.clone() for k, v in model.state_dict().items()}
 
-            _build_native_mistral_checkpoint(native_dir)
-            model = MistralForCausalLM.from_pretrained(str(native_dir), mistral_format=True)
-            original_sd = {k: v.clone() for k, v in model.state_dict().items()}
+        model.save_pretrained(str(hf_dir), save_format="hf")
+        model2 = MistralForCausalLM.from_pretrained(str(hf_dir))
 
-            model.save_pretrained(str(hf_dir), save_format="hf")
-            model2 = MistralForCausalLM.from_pretrained(str(hf_dir))
-
-            model2.save_pretrained(str(native2_dir), save_format="mistral")
-            model3 = MistralForCausalLM.from_pretrained(str(native2_dir), mistral_format=True)
+        model2.save_pretrained(str(native2_dir), save_format="mistral")
+        model3 = MistralForCausalLM.from_pretrained(str(native2_dir), mistral_format=True)
 
         for key in original_sd:
-            self.assertTrue(
-                torch.equal(original_sd[key], model3.state_dict()[key]),
-                f"Roundtrip mismatch for {key}",
-            )
+            assert torch.equal(original_sd[key], model3.state_dict()[key]), f"Roundtrip mismatch for {key}"
 
-    def test_hf_to_native_to_hf(self):
+    def test_hf_to_native_to_hf(self, tmp_path):
         r"""HF → save native → reload → save HF produces identical weights."""
-        import tempfile
-
         config = _tiny_mistral_config()
         with torch.device("meta"):
             model = MistralForCausalLM(config)
         ref_sd = {k: torch.randn(v.shape) for k, v in model.named_parameters()}
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = Path(tmpdir)
-            hf_dir = tmpdir / "hf"
-            hf_dir.mkdir()
-            native_dir = tmpdir / "native"
-            hf2_dir = tmpdir / "hf2"
+        hf_dir = tmp_path / "hf"
+        hf_dir.mkdir()
+        native_dir = tmp_path / "native"
+        hf2_dir = tmp_path / "hf2"
 
-            # Save as HF
-            save_file(ref_sd, str(hf_dir / "model.safetensors"))
-            config.save_pretrained(str(hf_dir))
+        # Save as HF
+        save_file(ref_sd, str(hf_dir / "model.safetensors"))
+        config.save_pretrained(str(hf_dir))
 
-            # Load HF → save native
-            model = MistralForCausalLM.from_pretrained(str(hf_dir))
-            model.save_pretrained(str(native_dir), save_format="mistral")
+        # Load HF → save native
+        model = MistralForCausalLM.from_pretrained(str(hf_dir))
+        model.save_pretrained(str(native_dir), save_format="mistral")
 
-            # Load native → save HF
-            model2 = MistralForCausalLM.from_pretrained(str(native_dir), mistral_format=True)
-            model2.save_pretrained(str(hf2_dir), save_format="hf")
+        # Load native → save HF
+        model2 = MistralForCausalLM.from_pretrained(str(native_dir), mistral_format=True)
+        model2.save_pretrained(str(hf2_dir), save_format="hf")
 
-            # Reload HF
-            model3 = MistralForCausalLM.from_pretrained(str(hf2_dir))
+        # Reload HF
+        model3 = MistralForCausalLM.from_pretrained(str(hf2_dir))
 
         for key in ref_sd:
-            self.assertTrue(
-                torch.equal(ref_sd[key], model3.state_dict()[key]),
-                f"Roundtrip mismatch for {key}",
-            )
+            assert torch.equal(ref_sd[key], model3.state_dict()[key]), f"Roundtrip mismatch for {key}"
 
-    def test_config_native_to_hf_to_native(self):
+    def test_config_native_to_hf_to_native(self, tmp_path):
         r"""Config roundtrips correctly through native → HF → native."""
-        import tempfile
+        native_dir = tmp_path / "native"
+        native_dir.mkdir()
+        hf_dir = tmp_path / "hf"
+        native2_dir = tmp_path / "native2"
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = Path(tmpdir)
-            native_dir = tmpdir / "native"
-            native_dir.mkdir()
-            hf_dir = tmpdir / "hf"
-            native2_dir = tmpdir / "native2"
+        _build_native_mistral_checkpoint(native_dir)
+        model = MistralForCausalLM.from_pretrained(str(native_dir), mistral_format=True)
 
-            _build_native_mistral_checkpoint(native_dir)
-            model = MistralForCausalLM.from_pretrained(str(native_dir), mistral_format=True)
+        model.save_pretrained(str(hf_dir), save_format="hf")
+        model2 = MistralForCausalLM.from_pretrained(str(hf_dir))
 
-            model.save_pretrained(str(hf_dir), save_format="hf")
-            model2 = MistralForCausalLM.from_pretrained(str(hf_dir))
+        model2.save_pretrained(str(native2_dir), save_format="mistral")
 
-            model2.save_pretrained(str(native2_dir), save_format="mistral")
+        # Verify params.json was written correctly
+        with open(native2_dir / "params.json", encoding="utf-8") as f:
+            params = json.load(f)
+        assert params["dim"] == _TINY_HIDDEN
+        assert params["n_layers"] == _TINY_LAYERS
+        assert params["n_heads"] == _TINY_HEADS
 
-            # Verify params.json was written correctly
-            with open(native2_dir / "params.json", encoding="utf-8") as f:
-                params = json.load(f)
-            self.assertEqual(params["dim"], _TINY_HIDDEN)
-            self.assertEqual(params["n_layers"], _TINY_LAYERS)
-            self.assertEqual(params["n_heads"], _TINY_HEADS)
-
-    def test_preserves_model_output(self):
+    def test_preserves_model_output(self, tmp_path):
         r"""Roundtripped model produces identical forward pass output."""
-        import tempfile
+        native_dir = tmp_path / "native"
+        native_dir.mkdir()
+        save_dir = tmp_path / "saved"
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = Path(tmpdir)
-            native_dir = tmpdir / "native"
-            native_dir.mkdir()
-            save_dir = tmpdir / "saved"
+        _build_native_mistral_checkpoint(native_dir)
+        model = MistralForCausalLM.from_pretrained(str(native_dir), mistral_format=True)
+        model.eval()
 
-            _build_native_mistral_checkpoint(native_dir)
-            model = MistralForCausalLM.from_pretrained(str(native_dir), mistral_format=True)
-            model.eval()
+        input_ids = torch.randint(0, _TINY_VOCAB, (1, 8))
+        with torch.no_grad():
+            original_output = model(input_ids).logits.clone()
 
-            input_ids = torch.randint(0, _TINY_VOCAB, (1, 8))
-            with torch.no_grad():
-                original_output = model(input_ids).logits.clone()
+        model.save_pretrained(str(save_dir), save_format="hf")
+        reloaded = MistralForCausalLM.from_pretrained(str(save_dir))
+        reloaded.eval()
 
-            model.save_pretrained(str(save_dir), save_format="hf")
-            reloaded = MistralForCausalLM.from_pretrained(str(save_dir))
-            reloaded.eval()
+        with torch.no_grad():
+            reloaded_output = reloaded(input_ids).logits
 
-            with torch.no_grad():
-                reloaded_output = reloaded(input_ids).logits
-
-        self.assertTrue(torch.equal(original_output, reloaded_output))
+        assert torch.equal(original_output, reloaded_output)
 
 
 @require_torch
-class TestMistral4SaveLoadRoundtrip(unittest.TestCase):
+class TestMistral4SaveLoadRoundtrip:
     r"""Mistral4 roundtrip tests with MoE expert fusion."""
 
-    def test_native_to_hf_to_native(self):
+    def test_native_to_hf_to_native(self, tmp_path):
         r"""Mistral4 native → HF → native roundtrip preserves weights."""
-        import tempfile
+        native_dir = tmp_path / "native"
+        native_dir.mkdir()
+        hf_dir = tmp_path / "hf"
+        native2_dir = tmp_path / "native2"
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = Path(tmpdir)
-            native_dir = tmpdir / "native"
-            native_dir.mkdir()
-            hf_dir = tmpdir / "hf"
-            native2_dir = tmpdir / "native2"
+        _build_native_mistral4_checkpoint(native_dir)
+        model = Mistral4ForCausalLM.from_pretrained(str(native_dir), mistral_format=True)
+        original_sd = {k: v.clone() for k, v in model.state_dict().items()}
 
-            _build_native_mistral4_checkpoint(native_dir)
-            model = Mistral4ForCausalLM.from_pretrained(str(native_dir), mistral_format=True)
-            original_sd = {k: v.clone() for k, v in model.state_dict().items()}
+        model.save_pretrained(str(hf_dir), save_format="hf")
+        model2 = Mistral4ForCausalLM.from_pretrained(str(hf_dir))
 
-            model.save_pretrained(str(hf_dir), save_format="hf")
-            model2 = Mistral4ForCausalLM.from_pretrained(str(hf_dir))
-
-            model2.save_pretrained(str(native2_dir), save_format="mistral")
-            model3 = Mistral4ForCausalLM.from_pretrained(str(native2_dir), mistral_format=True)
+        model2.save_pretrained(str(native2_dir), save_format="mistral")
+        model3 = Mistral4ForCausalLM.from_pretrained(str(native2_dir), mistral_format=True)
 
         for key in original_sd:
-            self.assertTrue(
-                torch.equal(original_sd[key], model3.state_dict()[key]),
-                f"Roundtrip mismatch for {key}",
-            )
+            assert torch.equal(original_sd[key], model3.state_dict()[key]), f"Roundtrip mismatch for {key}"
 
-    def test_hf_to_native_to_hf(self):
+    def test_hf_to_native_to_hf(self, tmp_path):
         r"""Mistral4 HF → native → HF roundtrip preserves weights."""
-        import tempfile
-
         config = _tiny_mistral4_config()
         with torch.device("meta"):
             model = Mistral4ForCausalLM(config)
         ref_sd = {k: torch.randn(v.shape) for k, v in model.named_parameters()}
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = Path(tmpdir)
-            hf_dir = tmpdir / "hf"
-            hf_dir.mkdir()
-            native_dir = tmpdir / "native"
-            hf2_dir = tmpdir / "hf2"
+        hf_dir = tmp_path / "hf"
+        hf_dir.mkdir()
+        native_dir = tmp_path / "native"
+        hf2_dir = tmp_path / "hf2"
 
-            save_file(ref_sd, str(hf_dir / "model.safetensors"))
-            config.save_pretrained(str(hf_dir))
+        save_file(ref_sd, str(hf_dir / "model.safetensors"))
+        config.save_pretrained(str(hf_dir))
 
-            model = Mistral4ForCausalLM.from_pretrained(str(hf_dir))
-            model.save_pretrained(str(native_dir), save_format="mistral")
+        model = Mistral4ForCausalLM.from_pretrained(str(hf_dir))
+        model.save_pretrained(str(native_dir), save_format="mistral")
 
-            model2 = Mistral4ForCausalLM.from_pretrained(str(native_dir), mistral_format=True)
-            model2.save_pretrained(str(hf2_dir), save_format="hf")
+        model2 = Mistral4ForCausalLM.from_pretrained(str(native_dir), mistral_format=True)
+        model2.save_pretrained(str(hf2_dir), save_format="hf")
 
-            model3 = Mistral4ForCausalLM.from_pretrained(str(hf2_dir))
+        model3 = Mistral4ForCausalLM.from_pretrained(str(hf2_dir))
 
         for key in ref_sd:
-            self.assertTrue(
-                torch.equal(ref_sd[key], model3.state_dict()[key]),
-                f"Roundtrip mismatch for {key}",
-            )
+            assert torch.equal(ref_sd[key], model3.state_dict()[key]), f"Roundtrip mismatch for {key}"
