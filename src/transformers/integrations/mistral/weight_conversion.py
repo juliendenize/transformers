@@ -364,7 +364,7 @@ def _add_variant(weights_name: str, variant: str | None = None) -> str:
     return weights_name
 
 
-def _save_native_mistral_format(
+def save_native_mistral_format(
     save_directory: str | os.PathLike,
     config,
     index: dict | None,

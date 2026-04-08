@@ -71,7 +71,7 @@ from .integrations.flash_attention import flash_attention_forward
 from .integrations.flash_paged import paged_attention_forward
 from .integrations.flex_attention import flex_attention_forward
 from .integrations.hub_kernels import allow_all_hub_kernels, is_kernel
-from .integrations.mistral.weight_conversion import _save_native_mistral_format
+from .integrations.mistral.weight_conversion import save_native_mistral_format
 from .integrations.moe import ALL_EXPERTS_FUNCTIONS
 from .integrations.peft import maybe_load_adapters
 from .integrations.sdpa_attention import sdpa_attention_forward
@@ -3525,7 +3525,7 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
 
         # Handle native Mistral format: rename files and write params.json
         if save_format == "mistral":
-            _save_native_mistral_format(save_directory, self.config, index, variant)
+            save_native_mistral_format(save_directory, self.config, index, variant)
 
         if push_to_hub:
             # Eventually create an empty model card

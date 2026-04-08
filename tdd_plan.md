@@ -665,9 +665,9 @@ Test classes are grouped by class/module under test (appended to test_integratio
    - Validate: raise `ValueError` for unknown values
    - `save_format="hf"`: skip `revert_weight_conversion` (keep HF key names)
    - `save_format="mistral"`: revert keys to native, then call
-     `_save_native_mistral_format` for file renaming + `params.json`
+     `save_native_mistral_format` for file renaming + `params.json`
 
-3. **Moved `_save_native_mistral_format` to `weight_conversion.py`**:
+3. **Moved `save_native_mistral_format` to `weight_conversion.py`**:
    The function that renames `model.safetensors` → `consolidated.safetensors` and writes
    `params.json` lives in `integrations/mistral/weight_conversion.py`, not in
    `modeling_utils.py`. This keeps the `modeling_utils.py` diff minimal (~16 added lines):
