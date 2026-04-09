@@ -121,7 +121,13 @@ class TestMistralFormat:
         result = config._config_to_params_json()
         for key, value in params.items():
             if key not in skip_keys:
-                assert result[key] == value, f"Mismatch on key {key!r}"
+                if isinstance(value, dict):
+                    # Roundtrip may add default fields to nested dicts (e.g. MOEModelArgs),
+                    # so check that the original keys are a subset of the result.
+                    for sub_key, sub_value in value.items():
+                        assert result[key][sub_key] == sub_value, f"Mismatch on key {key!r}.{sub_key!r}"
+                else:
+                    assert result[key] == value, f"Mismatch on key {key!r}"
 
     @pytest.mark.parametrize(
         "config_cls, params_fixture",

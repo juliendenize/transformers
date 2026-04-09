@@ -950,10 +950,17 @@ class WeightConverter(WeightTransform):
         if ".*." in layer_name:
             full_name = layer_name.replace(".*.", ".0.")
 
+        # Target pattern keys may contain \1 backreferences (e.g. r"\1attention.q_proj.weight").
+        # Strip them to get the literal suffix for substring matching, since the backreference
+        # has already been resolved in `full_name` by `rename_source_key()`.
+        def _strip_backref(key: str) -> str:
+            return key.replace(r"\1", "") if r"\1" in key else key
+
         try:
-            prefix, _, suffix = next(full_name.partition(k) for k in collected_tensors.keys() if k in full_name)
-            # Rename the tensors
-            collected_tensors = {prefix + k + suffix: v for k, v in collected_tensors.items()}
+            stripped = {_strip_backref(k): k for k in collected_tensors}
+            prefix, _, suffix = next(full_name.partition(sk) for sk, ok in stripped.items() if sk in full_name)
+            # Rename the tensors using the stripped keys for partitioning
+            collected_tensors = {prefix + _strip_backref(k) + suffix: v for k, v in collected_tensors.items()}
         except StopIteration:
             # The target pattern keys may be regex patterns (e.g. from revert_weight_conversion).
             # Fall back to regex substitution: try matching each key as a regex against full_name

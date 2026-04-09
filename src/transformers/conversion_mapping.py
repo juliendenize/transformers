@@ -29,7 +29,6 @@ from .core_model_loading import (
     WeightTransform,
 )
 from .integrations.mistral.weight_conversion import (
-    fp8_scale_renamings,
     mistral3_native_text_converters,
     mistral3_native_text_renamings,
     mistral3_native_vision_converters,
@@ -99,6 +98,14 @@ _MODEL_TO_CONVERSION_PATTERN = {
     "siglip_text_model": "clip_text_model",
     "siglip2_text_model": "clip_text_model",
     "xclip_text_model": "clip_text_model",
+}
+
+# Model types whose conversion mapping already covers their submodules' model types.
+# When a parent model_type lists child model_types here, the recursive submodule scan
+# in get_model_conversion_mapping() will skip those children, preventing duplicate or
+# conflicting converters from being added.
+_COVERED_SUBMODULE_MODEL_TYPES: dict[str, set[str]] = {
+    "mistral3": {"mistral", "ministral3"},
 }
 
 
@@ -802,18 +809,15 @@ def _build_checkpoint_conversion_mapping():
     ]
 
     mapping["mistral"] = mistral_base_native_renamings() + mistral_base_native_converters()
-    mapping["ministral3"] = mistral_base_native_renamings() + mistral_base_native_converters() + fp8_scale_renamings()
-
+    mapping["ministral3"] = mistral_base_native_renamings() + mistral_base_native_converters()
     mapping["mistral3"] = (
-        mapping["llava"].copy()
+        mistral3_native_vision_renamings()
+        + mistral3_native_vision_converters()
         + mistral3_native_text_renamings()
         + mistral3_native_text_converters()
-        + mistral3_native_vision_renamings()
-        + mistral3_native_vision_converters()
-        + fp8_scale_renamings()
     )
 
-    mapping["mistral4"] = mistral4_native_renamings() + fp8_scale_renamings() + mistral4_native_converters()
+    mapping["mistral4"] = mistral4_native_renamings() + mistral4_native_converters()
 
     for model_type, base_pattern in _MODEL_TO_CONVERSION_PATTERN.items():
         if model_type in mapping:
@@ -890,6 +894,11 @@ def get_model_conversion_mapping(
             if conversions is not None:
                 weight_conversions.extend(conversions)
                 seen_model_types.add(submodule.config.model_type)
+                # Some composite models already handle their submodules' conversions
+                # (e.g. mistral3 already includes text-backbone converters for the inner
+                # "mistral" language_model). Pre-populate seen_model_types so the
+                # recursive scan below skips those submodules.
+                seen_model_types.update(_COVERED_SUBMODULE_MODEL_TYPES.get(submodule.config.model_type, set()))
 
     if add_legacy:
         weight_conversions.extend(get_checkpoint_conversion_mapping("legacy"))

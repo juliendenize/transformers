@@ -28,6 +28,8 @@ if is_torch_available():
     from transformers.integrations.mistral.weight_conversion import (
         FP8AwareMergeAndConcatenate,
         FP8AwareSplitAndUnstack,
+        FP8ScaleFusionMerge,
+        FP8ScaleFusionSplit,
         fp8_scale_renamings,
         mistral3_native_text_renamings,
         mistral3_native_vision_converters,
@@ -157,11 +159,11 @@ class TestMistral3Renamings(unittest.TestCase):
     def test_text_renamings_prefixed(self):
         renamings = mistral3_native_text_renamings()
         result = _apply_renamings("output.weight", renamings)
-        self.assertEqual(result, "language_model.lm_head.weight")
+        self.assertEqual(result, "lm_head.weight")
         result = _apply_renamings("tok_embeddings.weight", renamings)
-        self.assertEqual(result, "language_model.model.embed_tokens.weight")
+        self.assertEqual(result, "language_model.embed_tokens.weight")
         result = _apply_renamings("layers.0.attention.wo.weight", renamings)
-        self.assertEqual(result, "language_model.model.layers.0.self_attn.o_proj.weight")
+        self.assertEqual(result, "language_model.layers.0.self_attn.o_proj.weight")
 
     def test_vision_renamings(self):
         renamings = mistral3_native_vision_renamings()
@@ -325,6 +327,81 @@ class TestFP8AwareMergeAndConcatenate(unittest.TestCase):
         self.assertIn("gate_up_proj", result)
         self.assertEqual(result["gate_up_proj"].shape, (1, 32, 32))
 
+    def test_merge_bf16_glob_keys(self):
+        r"""Full glob-style keys (``experts.*.w1.weight``) are matched by suffix."""
+        op = FP8AwareMergeAndConcatenate()
+        n_experts = 4
+        gate_dim, up_dim, in_dim = 16, 16, 32
+        w1 = [torch.randn(gate_dim, in_dim) for _ in range(n_experts)]
+        w3 = [torch.randn(up_dim, in_dim) for _ in range(n_experts)]
+        result = op.convert(
+            input_dict={"experts.*.w1.weight": w1, "experts.*.w3.weight": w3},
+            source_patterns=["experts.*.w1.weight", "experts.*.w3.weight"],
+            target_patterns=["gate_up_proj"],
+        )
+        self.assertIn("gate_up_proj", result)
+        self.assertEqual(result["gate_up_proj"].shape, (n_experts, gate_dim + up_dim, in_dim))
+
+    def test_merge_per_tensor_fp8_renamed_keys(self):
+        r"""Post-renamed scale keys (``weight_scale_inv``) are recognised."""
+        op = FP8AwareMergeAndConcatenate()
+        n_experts = 2
+        gate_dim, up_dim, in_dim = 16, 16, 32
+        w1 = [torch.randn(gate_dim, in_dim).to(torch.float8_e4m3fn) for _ in range(n_experts)]
+        w3 = [torch.randn(up_dim, in_dim).to(torch.float8_e4m3fn) for _ in range(n_experts)]
+        w1_scales = [torch.tensor(0.5) for _ in range(n_experts)]
+        w3_scales = [torch.tensor(0.3) for _ in range(n_experts)]
+        result = op.convert(
+            input_dict={
+                "experts.*.w1.weight": w1,
+                "experts.*.w3.weight": w3,
+                "experts.*.w1.weight_scale_inv": w1_scales,
+                "experts.*.w3.weight_scale_inv": w3_scales,
+            },
+            source_patterns=[
+                "experts.*.w1.weight",
+                "experts.*.w3.weight",
+                "experts.*.w1.weight_scale_inv",
+                "experts.*.w3.weight_scale_inv",
+            ],
+            target_patterns=["gate_up_proj", "gate_up_proj_scale_inv"],
+        )
+        self.assertIn("gate_up_proj", result)
+        self.assertIn("gate_up_proj_scale_inv", result)
+        self.assertEqual(result["gate_up_proj"].dtype, torch.float8_e4m3fn)
+
+    def test_merge_with_activation_scales(self):
+        r"""Activation scales are fused via per-expert max of w1/w3."""
+        op = FP8AwareMergeAndConcatenate()
+        n_experts = 4
+        gate_dim, up_dim, in_dim = 16, 16, 32
+        w1 = [torch.randn(gate_dim, in_dim) for _ in range(n_experts)]
+        w3 = [torch.randn(up_dim, in_dim) for _ in range(n_experts)]
+        w1_act = [torch.tensor(float(i)) for i in range(n_experts)]
+        w3_act = [torch.tensor(float(i + 1)) for i in range(n_experts)]
+        result = op.convert(
+            input_dict={
+                "experts.*.w1.weight": w1,
+                "experts.*.w3.weight": w3,
+                "experts.*.w1.activation_scale": w1_act,
+                "experts.*.w3.activation_scale": w3_act,
+            },
+            source_patterns=[
+                "experts.*.w1.weight",
+                "experts.*.w3.weight",
+                "experts.*.w1.activation_scale",
+                "experts.*.w3.activation_scale",
+            ],
+            target_patterns=["gate_up_proj", "gate_up_proj_activation_scale"],
+        )
+        self.assertIn("gate_up_proj", result)
+        self.assertIn("gate_up_proj_activation_scale", result)
+        act = result["gate_up_proj_activation_scale"]
+        self.assertEqual(act.shape, (n_experts,))
+        for e in range(n_experts):
+            expected = max(float(e), float(e + 1))
+            self.assertAlmostEqual(act[e].item(), expected)
+
 
 @require_torch
 class TestFP8AwareSplitAndUnstack(unittest.TestCase):
@@ -395,6 +472,124 @@ class TestFP8AwareSplitAndUnstack(unittest.TestCase):
         for i in range(n_experts):
             torch.testing.assert_close(reversed_result["w1.weight"][i], w1[i])
             torch.testing.assert_close(reversed_result["w3.weight"][i], w3[i])
+
+    def test_roundtrip_activation_scales(self):
+        r"""Activation scales survive merge → split roundtrip."""
+        merge_op = FP8AwareMergeAndConcatenate()
+        split_op = FP8AwareSplitAndUnstack()
+        n_experts = 4
+        gate_dim, up_dim, in_dim = 16, 16, 32
+        w1_orig = [torch.randn(gate_dim, in_dim) for _ in range(n_experts)]
+        w3_orig = [torch.randn(up_dim, in_dim) for _ in range(n_experts)]
+        # Use identical w1/w3 activation scales so max == original
+        act_scales = [torch.tensor(float(i + 1)) for i in range(n_experts)]
+        fused = merge_op.convert(
+            input_dict={
+                "w1.weight": w1_orig,
+                "w3.weight": w3_orig,
+                "w1.qscale_act": act_scales,
+                "w3.qscale_act": [s.clone() for s in act_scales],
+            },
+            source_patterns=["w1.weight", "w3.weight", "w1.qscale_act", "w3.qscale_act"],
+            target_patterns=["gate_up_proj", "gate_up_proj_activation_scale"],
+        )
+        self.assertIn("gate_up_proj_activation_scale", fused)
+
+        reversed_result = split_op.convert(
+            input_dict={
+                "gate_up_proj": [fused["gate_up_proj"]],
+                "gate_up_proj_activation_scale": [fused["gate_up_proj_activation_scale"]],
+            },
+            source_patterns=["gate_up_proj", "gate_up_proj_activation_scale"],
+            target_patterns=["w1.weight", "w3.weight", "w1.qscale_act", "w3.qscale_act"],
+        )
+        self.assertIn("w1.qscale_act", reversed_result)
+        self.assertIn("w3.qscale_act", reversed_result)
+        for i in range(n_experts):
+            self.assertAlmostEqual(reversed_result["w1.qscale_act"][i].item(), float(i + 1))
+            self.assertAlmostEqual(reversed_result["w3.qscale_act"][i].item(), float(i + 1))
+
+
+@require_torch
+class TestFP8ScaleFusionMerge(unittest.TestCase):
+    r"""Tests for `FP8ScaleFusionMerge` and `FP8ScaleFusionSplit`."""
+
+    def test_per_tensor_merge(self):
+        r"""Per-tensor scales are fused via max and unsqueezed to [n, 1, 1]."""
+        op = FP8ScaleFusionMerge()
+        n_experts = 4
+        w1_scales = [torch.tensor(0.5) for _ in range(n_experts)]
+        w3_scales = [torch.tensor(0.3) for _ in range(n_experts)]
+        result = op.convert(
+            input_dict={"w1.weight_scale_inv": w1_scales, "w3.weight_scale_inv": w3_scales},
+            source_patterns=["w1.weight_scale_inv", "w3.weight_scale_inv"],
+            target_patterns=["gate_up_proj_scale_inv"],
+        )
+        self.assertIn("gate_up_proj_scale_inv", result)
+        fused = result["gate_up_proj_scale_inv"]
+        self.assertEqual(fused.shape, (n_experts, 1, 1))
+        for e in range(n_experts):
+            self.assertAlmostEqual(fused[e, 0, 0].item(), 0.5)
+
+    def test_blockwise_merge(self):
+        r"""Block-wise scales are concatenated along dim 0 then stacked."""
+        op = FP8ScaleFusionMerge()
+        n_experts = 2
+        w1_scales = [torch.randn(4, 2) for _ in range(n_experts)]
+        w3_scales = [torch.randn(4, 2) for _ in range(n_experts)]
+        result = op.convert(
+            input_dict={"w1.weight_scale_inv": w1_scales, "w3.weight_scale_inv": w3_scales},
+            source_patterns=["w1.weight_scale_inv", "w3.weight_scale_inv"],
+            target_patterns=["gate_up_proj_scale_inv"],
+        )
+        fused = result["gate_up_proj_scale_inv"]
+        self.assertEqual(fused.shape, (n_experts, 8, 2))
+
+    def test_roundtrip_per_tensor(self):
+        r"""Per-tensor scale merge → split roundtrip preserves values."""
+        merge_op = FP8ScaleFusionMerge()
+        split_op = FP8ScaleFusionSplit()
+        n_experts = 3
+        # Use identical w1/w3 scales so max == original
+        scales = [torch.tensor(float(i + 1)) for i in range(n_experts)]
+        fused = merge_op.convert(
+            input_dict={
+                "w1.weight_scale_inv": scales,
+                "w3.weight_scale_inv": [s.clone() for s in scales],
+            },
+            source_patterns=["w1.weight_scale_inv", "w3.weight_scale_inv"],
+            target_patterns=["gate_up_proj_scale_inv"],
+        )
+        reversed_result = split_op.convert(
+            input_dict={"gate_up_proj_scale_inv": [fused["gate_up_proj_scale_inv"]]},
+            source_patterns=["gate_up_proj_scale_inv"],
+            target_patterns=["w1.weight_scale_inv", "w3.weight_scale_inv"],
+        )
+        self.assertIn("w1.weight_scale_inv", reversed_result)
+        self.assertIn("w3.weight_scale_inv", reversed_result)
+        for i in range(n_experts):
+            self.assertAlmostEqual(reversed_result["w1.weight_scale_inv"][i].item(), float(i + 1))
+
+    def test_roundtrip_blockwise(self):
+        r"""Block-wise scale merge → split roundtrip preserves values."""
+        merge_op = FP8ScaleFusionMerge()
+        split_op = FP8ScaleFusionSplit()
+        n_experts = 2
+        w1_scales = [torch.randn(4, 2) for _ in range(n_experts)]
+        w3_scales = [torch.randn(4, 2) for _ in range(n_experts)]
+        fused = merge_op.convert(
+            input_dict={"w1.scale": w1_scales, "w3.scale": w3_scales},
+            source_patterns=["w1.scale", "w3.scale"],
+            target_patterns=["gate_up_proj_scale_inv"],
+        )
+        reversed_result = split_op.convert(
+            input_dict={"gate_up_proj_scale_inv": [fused["gate_up_proj_scale_inv"]]},
+            source_patterns=["gate_up_proj_scale_inv"],
+            target_patterns=["w1.scale", "w3.scale"],
+        )
+        for i in range(n_experts):
+            torch.testing.assert_close(reversed_result["w1.scale"][i], w1_scales[i])
+            torch.testing.assert_close(reversed_result["w3.scale"][i], w3_scales[i])
 
 
 if __name__ == "__main__":

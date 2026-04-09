@@ -92,11 +92,17 @@ MISTRAL3_PARAMS = {
         "num_attention_heads": 16,
         "patch_size": 14,
         "image_size": 1540,
-        "head_dim": 64,
         "intermediate_size": 4096,
+        "num_channels": 3,
+        "max_image_size": 1540,
+        "rope_theta": 10000.0,
+        "mm_projector_id": "patch_merge",
+        "add_pre_mm_projector_layer_norm": True,
         "adapter_bias": False,
         "spatial_merge_size": 2,
         "image_token_id": 10,
+        "image_break_token_id": 12,
+        "image_end_token_id": 13,
     },
 }
 

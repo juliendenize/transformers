@@ -851,6 +851,7 @@ def replace_with_fp8_linear(
                     **module_kwargs,
                 )
             if new_module is not None:
+                new_module._is_hf_initialized = True
                 model.set_submodule(module_name, new_module)
                 has_been_replaced = True
 

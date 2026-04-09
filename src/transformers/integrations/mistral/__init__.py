@@ -1,0 +1,38 @@
+from __future__ import annotations
+
+import importlib
+import sys
+from types import ModuleType
+
+
+__all__ = [
+    "MistralConverter",
+    "convert_tekken_processor",
+    "convert_tekken_tokenizer",
+]
+
+_MODULE = "tokenizer"
+
+_ATTR_TO_MODULE = {
+    "MistralConverter": _MODULE,
+    "convert_tekken_processor": _MODULE,
+    "convert_tekken_tokenizer": _MODULE,
+}
+
+
+class _LazyModule(ModuleType):
+    r"""Lazily re-export public names to break circular imports."""
+
+    def __getattr__(self, name: str):
+        if name in _ATTR_TO_MODULE:
+            submodule = importlib.import_module(f".{_ATTR_TO_MODULE[name]}", __name__)
+            value = getattr(submodule, name)
+            setattr(self, name, value)
+            return value
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    def __dir__(self):
+        return list(__all__) + list(super().__dir__())
+
+
+sys.modules[__name__].__class__ = _LazyModule

@@ -15,10 +15,13 @@
 Processor class for Pixtral.
 """
 
+import os
+
 import numpy as np
 
 from ...feature_extraction_utils import BatchFeature
 from ...image_utils import ImageInput, is_valid_image
+from ...integrations.mistral import convert_tekken_processor
 from ...processing_utils import (
     MultiModalData,
     ProcessingKwargs,
@@ -26,7 +29,7 @@ from ...processing_utils import (
     Unpack,
 )
 from ...tokenization_utils_base import PreTokenizedInput, TextInput
-from ...utils import auto_docstring, is_vision_available, logging
+from ...utils import auto_docstring, cached_file, is_vision_available, logging
 from ...utils.import_utils import requires
 
 
@@ -98,6 +101,106 @@ class PixtralProcessor(ProcessorMixin):
         self.image_break_token_id = tokenizer.convert_tokens_to_ids(self.image_break_token)
         self.image_end_token_id = tokenizer.convert_tokens_to_ids(self.image_end_token)
         self.image_ids = [self.image_token_id, self.image_break_token_id, self.image_end_token_id]
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        pretrained_model_name_or_path: str | os.PathLike,
+        cache_dir: str | os.PathLike | None = None,
+        force_download: bool = False,
+        local_files_only: bool = False,
+        token: str | bool | None = None,
+        revision: str = "main",
+        **kwargs,
+    ) -> "PixtralProcessor":
+        r"""Instantiate a :class:`PixtralProcessor` from a pretrained checkpoint.
+
+        In addition to the standard HuggingFace processor files, this method supports
+        native Mistral checkpoints that contain ``tekken.json`` and ``params.json`` instead
+        of ``processor_config.json`` / ``tokenizer.json``.
+
+        Args:
+            pretrained_model_name_or_path: Path, model id, or Hub identifier.
+            cache_dir: Where to cache downloaded files.
+            force_download: Whether to force re-download.
+            local_files_only: Whether to only look at local files.
+            token: Authentication token for the Hub.
+            revision: Git revision to use.
+            **kwargs: Additional keyword arguments forwarded to the standard loading
+                machinery. The extra keyword ``mistral_format`` (bool | None) controls
+                format detection:
+
+                - ``True``: force loading from ``tekken.json`` + ``params.json``.
+                - ``False``: force loading from standard HuggingFace files.
+                - ``None`` (default): auto-detect.
+        """
+
+        mistral_format = kwargs.pop("mistral_format", None)
+
+        _cache_kwargs = {
+            "cache_dir": cache_dir,
+            "force_download": force_download,
+            "local_files_only": local_files_only,
+            "revision": revision,
+        }
+        if token is not None:
+            _cache_kwargs["token"] = token
+
+        if mistral_format is None:
+            tekken_file = cached_file(
+                pretrained_model_name_or_path,
+                "tekken.json",
+                _raise_exceptions_for_missing_entries=False,
+                _raise_exceptions_for_connection_errors=False,
+                **_cache_kwargs,
+            )
+            mistral_format = tekken_file is not None
+        else:
+            tekken_file = None
+
+        if not mistral_format:
+            return super().from_pretrained(
+                pretrained_model_name_or_path,
+                cache_dir=cache_dir,
+                force_download=force_download,
+                local_files_only=local_files_only,
+                token=token,
+                revision=revision,
+                **kwargs,
+            )
+
+        tekken_file = cached_file(pretrained_model_name_or_path, "tekken.json", **_cache_kwargs)
+        if tekken_file is None:
+            raise OSError(
+                f"Cannot find 'tekken.json' at '{pretrained_model_name_or_path}'. "
+                "Set `mistral_format=False` to load from standard HuggingFace files instead."
+            )
+
+        params_file = cached_file(pretrained_model_name_or_path, "params.json", **_cache_kwargs)
+        if params_file is None:
+            raise OSError(
+                f"Cannot find 'params.json' at '{pretrained_model_name_or_path}'. "
+                "Both 'tekken.json' and 'params.json' are required to load a native Mistral processor."
+            )
+
+        # Use the standard get_processor_dict machinery to discover chat templates.
+        # It gracefully handles missing processor_config.json by returning an empty dict.
+        processor_dict, _ = cls.get_processor_dict(
+            pretrained_model_name_or_path,
+            cache_dir=cache_dir,
+            force_download=force_download,
+            local_files_only=local_files_only,
+            token=token,
+            revision=revision,
+            **kwargs,
+        )
+        chat_template = processor_dict.get("chat_template")
+
+        return convert_tekken_processor(
+            tokenizer_file=tekken_file,
+            params_file=params_file,
+            chat_template=chat_template,
+        )
 
     @auto_docstring
     def __call__(

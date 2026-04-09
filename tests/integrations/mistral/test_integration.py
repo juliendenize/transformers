@@ -13,12 +13,25 @@
 # limitations under the License.
 r"""Tests for Phase 5+6: from_pretrained pipeline, save_pretrained native format, and roundtrips."""
 
+import fnmatch
+import gc
 import json
+import re
+import tempfile
+import unittest
 from pathlib import Path
 
 import pytest
+from huggingface_hub import snapshot_download
 
-from transformers.testing_utils import require_torch
+from transformers.testing_utils import (
+    backend_empty_cache,
+    cleanup,
+    require_torch,
+    require_torch_accelerator,
+    slow,
+    torch_device,
+)
 
 
 if True:  # guarded import block for test discovery
@@ -29,8 +42,11 @@ if is_torch_available():
     from safetensors.torch import save_file
 
     from transformers import (
+        AutoConfig,
+        AutoTokenizer,
         Ministral3Config,
         Ministral3ForCausalLM,
+        Mistral3ForConditionalGeneration,
         Mistral4Config,
         Mistral4ForCausalLM,
         MistralConfig,
@@ -51,6 +67,64 @@ _TINY_LAYERS = 2
 _TINY_VOCAB = 64
 _TINY_INTERMEDIATE = 64
 _TINY_HEAD_DIM = _TINY_HIDDEN // _TINY_HEADS  # 16
+
+
+_CONFIG_INTERNAL_KEYS = {
+    "_loaded_from_mistral_format",
+    "transformers_weights",
+    "transformers_version",
+    "_name_or_path",
+    "_commit_hash",
+    # architectures is set by save_pretrained based on the model class, not by config loading.
+    "architectures",
+    # dtype is set at model-load time (from weights), not config-load time.
+    "dtype",
+    # sliding_window / quant_config may be absent in configs created directly
+    # but present after a native-format roundtrip.
+    "sliding_window",
+    "quant_config",
+}
+
+# Extra keys that the HF config's rope processing may add to rope_parameters
+# but are not produced by the native-format conversion functions.
+_ROPE_INTERNAL_KEYS = {"max_position_embeddings", "mscale", "type"}
+
+# Key patterns that are expected to be "unexpected" when loading a consolidated
+# Mistral-native checkpoint into a text-only model (VLM vision keys) or any
+# model (QAT training artifacts like fake_quantizer).
+_EXPECTED_UNEXPECTED_KEY_PATTERNS = {
+    r"^vision_encoder\.",
+    r"^vision_language_adapter\.",
+    r"^patch_merger\.",
+    r"^pre_mm_projector_norm\.",
+    r"fake_quantizer",
+}
+
+
+def _filter_expected_unexpected_keys(keys: list[str]) -> list[str]:
+    r"""Remove keys matching known-ignorable patterns from an unexpected-keys list."""
+    return [k for k in keys if not any(re.search(pat, k) for pat in _EXPECTED_UNEXPECTED_KEY_PATTERNS)]
+
+
+def _assert_config_matches(original, reloaded) -> None:
+    r"""Assert that a config survived a save/reload roundtrip.
+
+    Compares all config fields except internal metadata that may legitimately
+    differ between a freshly-constructed config and one loaded from disk.
+    Rope parameters are compared after stripping keys that the HF config
+    processing adds but the native conversion does not produce.
+    """
+    original_dict = {k: v for k, v in original.to_dict().items() if k not in _CONFIG_INTERNAL_KEYS}
+    reloaded_dict = {k: v for k, v in reloaded.to_dict().items() if k not in _CONFIG_INTERNAL_KEYS}
+
+    # Normalise rope_parameters before comparison: strip HF-only internal keys
+    for d in (original_dict, reloaded_dict):
+        if "rope_parameters" in d and isinstance(d["rope_parameters"], dict):
+            d["rope_parameters"] = {k: v for k, v in d["rope_parameters"].items() if k not in _ROPE_INTERNAL_KEYS}
+
+    assert original_dict == reloaded_dict, (
+        f"Config mismatch after roundtrip.\n  Original: {original_dict}\n  Reloaded: {reloaded_dict}"
+    )
 
 
 def _tiny_mistral_config() -> "MistralConfig":
@@ -293,6 +367,12 @@ def _build_native_mistral4_checkpoint(tmpdir: Path) -> "Mistral4Config":
             "num_expert_groups": 1,
             "num_expert_groups_per_tok": 1,
         },
+        "yarn": {
+            "factor": 128.0,
+            "original_max_position_embeddings": 8192,
+            "beta": 32.0,
+            "alpha": 1.0,
+        },
     }
     with open(tmpdir / "params.json", "w", encoding="utf-8") as f:
         json.dump(params, f, ensure_ascii=False)
@@ -385,7 +465,7 @@ class TestMistralFromPretrained:
             assert torch.allclose(loaded_sd[key], ref_sd[key], atol=1e-6), f"Weight mismatch for {key}"
 
     def test_hf_save_reload_roundtrip(self, tmp_path):
-        r"""Load native → save → reload produces identical weights.
+        r"""Load native → save → reload produces identical weights and config.
 
         `save_pretrained` applies `revert_weight_conversion`, saving weights
         with native keys. Reloading re-applies the forward conversion mapping
@@ -398,6 +478,7 @@ class TestMistralFromPretrained:
         _build_native_mistral_checkpoint(native_dir)
         model = MistralForCausalLM.from_pretrained(str(native_dir), mistral_format=True)
         original_sd = {k: v.clone() for k, v in model.state_dict().items()}
+        original_config = model.config
 
         model.save_pretrained(str(save_dir))
         # Saved dir has config.json + model.safetensors (with native keys).
@@ -405,6 +486,8 @@ class TestMistralFromPretrained:
         reloaded = MistralForCausalLM.from_pretrained(str(save_dir))
         reloaded_sd = reloaded.state_dict()
 
+        _assert_config_matches(original_config, reloaded.config)
+        assert set(original_sd.keys()) == set(reloaded_sd.keys())
         for key in original_sd:
             assert torch.equal(original_sd[key], reloaded_sd[key]), f"Roundtrip mismatch for {key}"
 
@@ -427,7 +510,7 @@ class TestMinistral3FromPretrained:
     r"""Ministral3 uses the same weight layout as base Mistral (with FP8 scales for quantized models)."""
 
     def test_native_format(self, tmp_path):
-        r"""Loading a tiny Ministral3 native checkpoint succeeds."""
+        r"""Loading a tiny Ministral3 native checkpoint succeeds with correct config."""
         config = Ministral3Config(
             hidden_size=_TINY_HIDDEN,
             num_hidden_layers=_TINY_LAYERS,
@@ -489,7 +572,7 @@ class TestMistral4FromPretrained:
         assert isinstance(model, Mistral4ForCausalLM)
 
     def test_hf_save_reload_roundtrip(self, tmp_path):
-        r"""Load native Mistral4 → save HF → reload produces identical weights."""
+        r"""Load native Mistral4 → save HF → reload produces identical weights and config."""
         native_dir = tmp_path / "native"
         native_dir.mkdir()
         hf_dir = tmp_path / "hf"
@@ -497,11 +580,13 @@ class TestMistral4FromPretrained:
         _build_native_mistral4_checkpoint(native_dir)
         model = Mistral4ForCausalLM.from_pretrained(str(native_dir), mistral_format=True)
         original_sd = {k: v.clone() for k, v in model.state_dict().items()}
+        original_config = model.config
 
         model.save_pretrained(str(hf_dir))
         reloaded = Mistral4ForCausalLM.from_pretrained(str(hf_dir))
         reloaded_sd = reloaded.state_dict()
 
+        _assert_config_matches(original_config, reloaded.config)
         for key in original_sd:
             assert torch.equal(original_sd[key], reloaded_sd[key]), f"Roundtrip mismatch for {key}"
 
@@ -587,6 +672,7 @@ class TestRevertWeightConversion:
         model.config.save_pretrained(str(save_dir))
         reloaded = MistralForCausalLM.from_pretrained(str(save_dir))
 
+        assert set(original_sd.keys()) == set(reloaded.state_dict().keys())
         for key in original_sd:
             assert torch.equal(original_sd[key], reloaded.state_dict()[key]), f"Roundtrip mismatch for {key}"
 
@@ -670,7 +756,7 @@ class TestMistralSaveLoadRoundtrip:
     r"""Full roundtrip tests: native → HF → native and HF → native → HF."""
 
     def test_native_to_hf_to_native(self, tmp_path):
-        r"""Native → load → save HF → reload → save native → reload produces identical weights."""
+        r"""Native → load → save HF → reload → save native → reload preserves config and weights."""
         native_dir = tmp_path / "native"
         native_dir.mkdir()
         hf_dir = tmp_path / "hf"
@@ -678,19 +764,23 @@ class TestMistralSaveLoadRoundtrip:
 
         _build_native_mistral_checkpoint(native_dir)
         model = MistralForCausalLM.from_pretrained(str(native_dir), mistral_format=True)
+        original_config = model.config
         original_sd = {k: v.clone() for k, v in model.state_dict().items()}
 
         model.save_pretrained(str(hf_dir), save_format="hf")
         model2 = MistralForCausalLM.from_pretrained(str(hf_dir))
+        _assert_config_matches(original_config, model2.config)
 
         model2.save_pretrained(str(native2_dir), save_format="mistral")
         model3 = MistralForCausalLM.from_pretrained(str(native2_dir), mistral_format=True)
 
+        _assert_config_matches(original_config, model3.config)
+        assert set(original_sd.keys()) == set(model3.state_dict().keys())
         for key in original_sd:
             assert torch.equal(original_sd[key], model3.state_dict()[key]), f"Roundtrip mismatch for {key}"
 
     def test_hf_to_native_to_hf(self, tmp_path):
-        r"""HF → save native → reload → save HF produces identical weights."""
+        r"""HF → save native → reload → save HF preserves config and weights."""
         config = _tiny_mistral_config()
         with torch.device("meta"):
             model = MistralForCausalLM(config)
@@ -707,15 +797,19 @@ class TestMistralSaveLoadRoundtrip:
 
         # Load HF → save native
         model = MistralForCausalLM.from_pretrained(str(hf_dir))
+        original_config = model.config
         model.save_pretrained(str(native_dir), save_format="mistral")
 
         # Load native → save HF
         model2 = MistralForCausalLM.from_pretrained(str(native_dir), mistral_format=True)
+        _assert_config_matches(original_config, model2.config)
         model2.save_pretrained(str(hf2_dir), save_format="hf")
 
         # Reload HF
         model3 = MistralForCausalLM.from_pretrained(str(hf2_dir))
 
+        _assert_config_matches(original_config, model3.config)
+        assert set(ref_sd.keys()) == set(model3.state_dict().keys())
         for key in ref_sd:
             assert torch.equal(ref_sd[key], model3.state_dict()[key]), f"Roundtrip mismatch for {key}"
 
@@ -770,7 +864,7 @@ class TestMistral4SaveLoadRoundtrip:
     r"""Mistral4 roundtrip tests with MoE expert fusion."""
 
     def test_native_to_hf_to_native(self, tmp_path):
-        r"""Mistral4 native → HF → native roundtrip preserves weights."""
+        r"""Mistral4 native → HF → native roundtrip preserves weights and config."""
         native_dir = tmp_path / "native"
         native_dir.mkdir()
         hf_dir = tmp_path / "hf"
@@ -778,19 +872,22 @@ class TestMistral4SaveLoadRoundtrip:
 
         _build_native_mistral4_checkpoint(native_dir)
         model = Mistral4ForCausalLM.from_pretrained(str(native_dir), mistral_format=True)
+        original_config = model.config
         original_sd = {k: v.clone() for k, v in model.state_dict().items()}
 
         model.save_pretrained(str(hf_dir), save_format="hf")
         model2 = Mistral4ForCausalLM.from_pretrained(str(hf_dir))
+        _assert_config_matches(original_config, model2.config)
 
         model2.save_pretrained(str(native2_dir), save_format="mistral")
         model3 = Mistral4ForCausalLM.from_pretrained(str(native2_dir), mistral_format=True)
 
+        _assert_config_matches(original_config, model3.config)
         for key in original_sd:
             assert torch.equal(original_sd[key], model3.state_dict()[key]), f"Roundtrip mismatch for {key}"
 
     def test_hf_to_native_to_hf(self, tmp_path):
-        r"""Mistral4 HF → native → HF roundtrip preserves weights."""
+        r"""Mistral4 HF → native → HF roundtrip preserves weights and config."""
         config = _tiny_mistral4_config()
         with torch.device("meta"):
             model = Mistral4ForCausalLM(config)
@@ -805,12 +902,467 @@ class TestMistral4SaveLoadRoundtrip:
         config.save_pretrained(str(hf_dir))
 
         model = Mistral4ForCausalLM.from_pretrained(str(hf_dir))
+        original_config = model.config
         model.save_pretrained(str(native_dir), save_format="mistral")
 
         model2 = Mistral4ForCausalLM.from_pretrained(str(native_dir), mistral_format=True)
+        _assert_config_matches(original_config, model2.config)
         model2.save_pretrained(str(hf2_dir), save_format="hf")
 
         model3 = Mistral4ForCausalLM.from_pretrained(str(hf2_dir))
 
+        _assert_config_matches(original_config, model3.config)
         for key in ref_sd:
             assert torch.equal(ref_sd[key], model3.state_dict()[key]), f"Roundtrip mismatch for {key}"
+
+
+# ---------------------------------------------------------------------------
+# Slow-test download and assertion helpers
+# ---------------------------------------------------------------------------
+
+# Mistral-native checkpoint files: config (``params.json``), tokenizer
+# (``tekken.json``), and consolidated weights. Only these are downloaded so
+# that HF-format files (``config.json``, ``model*.safetensors``) never enter
+# the native directory — any such file would indicate config poisoning.
+_MISTRAL_DOWNLOAD_PATTERNS = [
+    "params.json",
+    "tekken.json",
+    "consolidated*.safetensors*",
+]
+
+# Files that ``save_pretrained`` may auto-generate beyond the core model artifacts.
+_HF_OPTIONAL_FILES = {"generation_config.json"}
+
+
+def _download_mistral_files(
+    model_id: str,
+    target_dir: Path,
+    allow_patterns: list[str] | None = None,
+) -> Path:
+    r"""Download Mistral-native checkpoint files into `target_dir`.
+
+    Uses `snapshot_download` with `local_dir` so that files land directly
+    in `target_dir` (no nested cache layout). Only files matching
+    `allow_patterns` are fetched.
+
+    Args:
+        model_id: Hub repository identifier (e.g. ``mistralai/Mistral-Small-3.2-24B-Instruct-2506``).
+        target_dir: Local directory to place the downloaded files in.
+        allow_patterns: Glob patterns passed to `snapshot_download`. Defaults
+            to `_MISTRAL_DOWNLOAD_PATTERNS`.
+
+    Returns:
+        The `target_dir` path (same as the input, for chaining convenience).
+    """
+    if allow_patterns is None:
+        allow_patterns = list(_MISTRAL_DOWNLOAD_PATTERNS)
+    snapshot_download(repo_id=model_id, local_dir=str(target_dir), allow_patterns=allow_patterns)
+    return target_dir
+
+
+def _assert_dir_contains_exactly(
+    directory: Path,
+    expected_patterns: set[str],
+    optional_patterns: set[str] | None = None,
+) -> None:
+    r"""Assert that `directory` contains exactly the expected files, nothing more.
+
+    Hidden entries (e.g. `.cache/`) created by `snapshot_download` metadata
+    are silently ignored. Every non-hidden file must match one of
+    `expected_patterns` or `optional_patterns`; all `expected_patterns` must
+    have at least one match.
+
+    Args:
+        directory: Directory to inspect (non-recursively for top-level files).
+        expected_patterns: Glob patterns that *must* each match at least one file.
+        optional_patterns: Glob patterns that *may* be present but not required.
+
+    Raises:
+        AssertionError: If an expected pattern has no match or an unexpected
+            file is found.
+    """
+    if optional_patterns is None:
+        optional_patterns = set()
+
+    actual_files = {f.name for f in directory.iterdir() if f.is_file() and not f.name.startswith(".")}
+
+    unmatched_files: set[str] = set()
+    for filename in actual_files:
+        is_expected = any(fnmatch.fnmatch(filename, pat) for pat in expected_patterns)
+        is_optional = any(fnmatch.fnmatch(filename, pat) for pat in optional_patterns)
+        if not is_expected and not is_optional:
+            unmatched_files.add(filename)
+
+    assert not unmatched_files, (
+        f"Unexpected files in {directory}: {sorted(unmatched_files)}. "
+        f"Expected patterns: {sorted(expected_patterns)}, optional: {sorted(optional_patterns)}"
+    )
+
+    for pattern in expected_patterns:
+        has_match = any(fnmatch.fnmatch(f, pattern) for f in actual_files)
+        assert has_match, f"Expected pattern {pattern!r} has no match in {directory}: {sorted(actual_files)}"
+
+
+def _assert_mistral_dir(directory: Path) -> None:
+    r"""Assert a directory contains only Mistral-native files and no HF artifacts.
+
+    Verifies that ``params.json``, ``tekken.json``, and consolidated weight
+    files are present, and that HF config files (``config.json``,
+    ``tokenizer.json``, ``tokenizer_config.json``) and HF weight files
+    (``model*.safetensors``) are absent — their presence would indicate
+    data poisoning compromising the config.
+    """
+    expected = {"params.json", "tekken.json", "consolidated*.safetensors*"}
+    _assert_dir_contains_exactly(directory, expected)
+
+    # Verify no HF artifacts leaked in
+    for forbidden in ("config.json", "tokenizer.json", "tokenizer_config.json"):
+        assert not (directory / forbidden).exists(), (
+            f"HF artifact {forbidden!r} found in Mistral-native directory {directory}"
+        )
+    hf_weights = list(directory.glob("model*.safetensors*"))
+    assert not hf_weights, (
+        f"HF weight files found in Mistral-native directory {directory}: {sorted(f.name for f in hf_weights)}"
+    )
+
+
+def _assert_hf_dir(directory: Path, weight_patterns: set[str] | None = None) -> None:
+    r"""Assert a directory contains only HF-format files and no Mistral-native artifacts.
+
+    Verifies that ``config.json`` and HF weight files are present, and that
+    native metadata (``params.json``, ``tekken.json``) and consolidated
+    weight files are absent.
+
+    Args:
+        directory: Directory to verify.
+        weight_patterns: Glob patterns for the weight files. Defaults to
+            ``{"model*.safetensors*"}``.
+    """
+    if weight_patterns is None:
+        weight_patterns = {"model*.safetensors*"}
+    expected = {"config.json"} | weight_patterns
+    # Tokenizer files are optional (only present after tokenizer.save_pretrained)
+    optional = _HF_OPTIONAL_FILES | {"tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"}
+    _assert_dir_contains_exactly(directory, expected, optional)
+
+    # Verify no Mistral-native artifacts leaked in
+    for forbidden in ("params.json", "tekken.json"):
+        assert not (directory / forbidden).exists(), (
+            f"Mistral artifact {forbidden!r} found in HF directory {directory}"
+        )
+    consolidated_files = list(directory.glob("consolidated*"))
+    assert not consolidated_files, (
+        f"Consolidated weight files found in HF directory {directory}: {sorted(f.name for f in consolidated_files)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Slow integration tests
+# ---------------------------------------------------------------------------
+
+
+@slow
+@require_torch_accelerator
+class TestMistralRealModelIntegration(unittest.TestCase):
+    r"""Slow tests that load real Mistral models from the Hub via native format conversion."""
+
+    model_id = "mistralai/Mistral-Small-3.2-24B-Instruct-2506"
+
+    def setUp(self):
+        cleanup(torch_device, gc_collect=True)
+
+    def tearDown(self):
+        cleanup(torch_device, gc_collect=True)
+
+    def test_native_format_roundtrip(self):
+        r"""Load real Mistral model from native format, save as HF, reload and verify config, tokenizer, and weights.
+
+        Downloads mistral-native files into an isolated directory, verifies
+        no HF artifacts are present, then saves to a separate HF directory
+        and verifies no mistral artifacts leaked.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mistral_dir = Path(tmpdir) / "mistral"
+            hf_dir = Path(tmpdir) / "hf"
+
+            # Download only the Mistral-native files
+            _download_mistral_files(self.model_id, mistral_dir)
+            _assert_mistral_dir(mistral_dir)
+
+            # Load from isolated mistral directory
+            model, loading_info = MistralForCausalLM.from_pretrained(
+                str(mistral_dir),
+                mistral_format=True,
+                device_map="auto",
+                torch_dtype=torch.float16,
+                output_loading_info=True,
+            )
+            unexpected = _filter_expected_unexpected_keys(loading_info["unexpected_keys"])
+            assert not unexpected, f"Unexpected keys during native load: {unexpected}"
+            assert not loading_info["missing_keys"], f"Missing keys during native load: {loading_info['missing_keys']}"
+            original_config = model.config
+            original_sd = {k: v.clone().cpu() for k, v in model.state_dict().items()}
+
+            # Save as HF format into a separate directory
+            model.save_pretrained(str(hf_dir), save_format="hf")
+            del model
+            backend_empty_cache(torch_device)
+            gc.collect()
+
+            # Verify HF dir contains only HF files (no mistral artifacts)
+            _assert_hf_dir(hf_dir)
+
+            # Verify config roundtrip
+            reloaded_config = AutoConfig.from_pretrained(str(hf_dir))
+            _assert_config_matches(original_config, reloaded_config)
+
+            # Verify tokenizer roundtrip: load from mistral dir, save to hf dir
+            original_tok = AutoTokenizer.from_pretrained(str(mistral_dir))
+            original_tok.save_pretrained(str(hf_dir))
+            reloaded_tok = AutoTokenizer.from_pretrained(str(hf_dir))
+            assert reloaded_tok.vocab_size == original_tok.vocab_size
+            test_text = "Hello, world!"
+            assert reloaded_tok.encode(test_text) == original_tok.encode(test_text)
+            assert reloaded_tok.decode(reloaded_tok.encode(test_text), skip_special_tokens=True) == test_text
+
+            # Verify weight roundtrip
+            reloaded, reload_info = MistralForCausalLM.from_pretrained(
+                str(hf_dir), device_map="auto", torch_dtype=torch.float16, output_loading_info=True
+            )
+            assert not reload_info["unexpected_keys"], (
+                f"Unexpected keys during HF reload: {reload_info['unexpected_keys']}"
+            )
+            assert not reload_info["missing_keys"], f"Missing keys during HF reload: {reload_info['missing_keys']}"
+            reloaded_sd = reloaded.state_dict()
+
+            for key in original_sd:
+                assert torch.equal(original_sd[key], reloaded_sd[key].cpu()), f"Roundtrip mismatch for {key}"
+
+            del reloaded
+            backend_empty_cache(torch_device)
+            gc.collect()
+
+
+@slow
+@require_torch_accelerator
+class TestMinistral3RealModelIntegration(unittest.TestCase):
+    r"""Slow tests that load real Ministral3 models from the Hub via native format conversion."""
+
+    model_id = "mistralai/Ministral-3-3B-Instruct-2512"
+
+    def setUp(self):
+        cleanup(torch_device, gc_collect=True)
+
+    def tearDown(self):
+        cleanup(torch_device, gc_collect=True)
+
+    def test_native_format_roundtrip(self):
+        r"""Load real Ministral3 from native format, save as HF, reload and verify config, tokenizer, and weights.
+
+        Downloads mistral-native files into an isolated directory, verifies
+        no HF artifacts are present, then saves to a separate HF directory
+        and verifies no mistral artifacts leaked.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mistral_dir = Path(tmpdir) / "mistral"
+            hf_dir = Path(tmpdir) / "hf"
+
+            _download_mistral_files(self.model_id, mistral_dir)
+            _assert_mistral_dir(mistral_dir)
+
+            model, loading_info = Ministral3ForCausalLM.from_pretrained(
+                str(mistral_dir),
+                mistral_format=True,
+                device_map="auto",
+                torch_dtype=torch.bfloat16,
+                output_loading_info=True,
+            )
+            unexpected = _filter_expected_unexpected_keys(loading_info["unexpected_keys"])
+            assert not unexpected, f"Unexpected keys during native load: {unexpected}"
+            assert not loading_info["missing_keys"], f"Missing keys during native load: {loading_info['missing_keys']}"
+            original_config = model.config
+            original_sd = {k: v.clone().cpu() for k, v in model.state_dict().items()}
+
+            model.save_pretrained(str(hf_dir), save_format="hf")
+            del model
+            backend_empty_cache(torch_device)
+            gc.collect()
+
+            _assert_hf_dir(hf_dir)
+
+            reloaded_config = AutoConfig.from_pretrained(str(hf_dir))
+            _assert_config_matches(original_config, reloaded_config)
+
+            original_tok = AutoTokenizer.from_pretrained(str(mistral_dir))
+            original_tok.save_pretrained(str(hf_dir))
+            reloaded_tok = AutoTokenizer.from_pretrained(str(hf_dir))
+            assert reloaded_tok.vocab_size == original_tok.vocab_size
+            test_text = "Hello, world!"
+            assert reloaded_tok.encode(test_text) == original_tok.encode(test_text)
+            assert reloaded_tok.decode(reloaded_tok.encode(test_text), skip_special_tokens=True) == test_text
+
+            reloaded, reload_info = Ministral3ForCausalLM.from_pretrained(
+                str(hf_dir), device_map="auto", torch_dtype=torch.bfloat16, output_loading_info=True
+            )
+            assert not reload_info["unexpected_keys"], (
+                f"Unexpected keys during HF reload: {reload_info['unexpected_keys']}"
+            )
+            assert not reload_info["missing_keys"], f"Missing keys during HF reload: {reload_info['missing_keys']}"
+            reloaded_sd = reloaded.state_dict()
+
+            for key in original_sd:
+                assert torch.equal(original_sd[key], reloaded_sd[key].cpu()), f"Roundtrip mismatch for {key}"
+
+            del reloaded
+            backend_empty_cache(torch_device)
+            gc.collect()
+
+
+@slow
+@require_torch_accelerator
+class TestMistral3RealModelIntegration(unittest.TestCase):
+    r"""Slow tests that load real Mistral3 VLM models from the Hub via native format conversion."""
+
+    model_id = "mistralai/Mistral-Small-3.2-24B-Instruct-2506"
+
+    def setUp(self):
+        cleanup(torch_device, gc_collect=True)
+
+    def tearDown(self):
+        cleanup(torch_device, gc_collect=True)
+
+    def test_native_format_roundtrip(self):
+        r"""Load real Mistral3 from native format, save as HF, reload and verify config, tokenizer, and weights.
+
+        Downloads mistral-native files into an isolated directory, verifies
+        no HF artifacts are present, then saves to a separate HF directory
+        and verifies no mistral artifacts leaked.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mistral_dir = Path(tmpdir) / "mistral"
+            hf_dir = Path(tmpdir) / "hf"
+
+            _download_mistral_files(self.model_id, mistral_dir)
+            _assert_mistral_dir(mistral_dir)
+
+            model, loading_info = Mistral3ForConditionalGeneration.from_pretrained(
+                str(mistral_dir),
+                mistral_format=True,
+                device_map="auto",
+                torch_dtype=torch.bfloat16,
+                output_loading_info=True,
+            )
+            unexpected = _filter_expected_unexpected_keys(loading_info["unexpected_keys"])
+            assert not unexpected, f"Unexpected keys during native load: {unexpected}"
+            assert not loading_info["missing_keys"], f"Missing keys during native load: {loading_info['missing_keys']}"
+            original_config = model.config
+            original_sd = {k: v.clone().cpu() for k, v in model.state_dict().items()}
+
+            model.save_pretrained(str(hf_dir), save_format="hf")
+            del model
+            backend_empty_cache(torch_device)
+            gc.collect()
+
+            _assert_hf_dir(hf_dir)
+
+            reloaded_config = AutoConfig.from_pretrained(str(hf_dir))
+            _assert_config_matches(original_config, reloaded_config)
+
+            original_tok = AutoTokenizer.from_pretrained(str(mistral_dir))
+            original_tok.save_pretrained(str(hf_dir))
+            reloaded_tok = AutoTokenizer.from_pretrained(str(hf_dir))
+            assert reloaded_tok.vocab_size == original_tok.vocab_size
+            test_text = "Hello, world!"
+            assert reloaded_tok.encode(test_text) == original_tok.encode(test_text)
+            assert reloaded_tok.decode(reloaded_tok.encode(test_text), skip_special_tokens=True) == test_text
+
+            reloaded, reload_info = Mistral3ForConditionalGeneration.from_pretrained(
+                str(hf_dir), device_map="auto", torch_dtype=torch.bfloat16, output_loading_info=True
+            )
+            assert not reload_info["unexpected_keys"], (
+                f"Unexpected keys during HF reload: {reload_info['unexpected_keys']}"
+            )
+            assert not reload_info["missing_keys"], f"Missing keys during HF reload: {reload_info['missing_keys']}"
+            reloaded_sd = reloaded.state_dict()
+
+            for key in original_sd:
+                assert torch.equal(original_sd[key], reloaded_sd[key].cpu()), f"Roundtrip mismatch for {key}"
+
+            del reloaded
+            backend_empty_cache(torch_device)
+            gc.collect()
+
+
+@slow
+@require_torch_accelerator
+class TestMistral4RealModelIntegration(unittest.TestCase):
+    r"""Slow tests that load real Mistral4 models from the Hub via native format conversion."""
+
+    model_id = "mistralai/Mistral-Small-4-119B-2603"
+
+    def setUp(self):
+        cleanup(torch_device, gc_collect=True)
+
+    def tearDown(self):
+        cleanup(torch_device, gc_collect=True)
+
+    def test_native_format_roundtrip(self):
+        r"""Load real Mistral4 from native format, save as HF, reload and verify config, tokenizer, and weights.
+
+        Downloads mistral-native files into an isolated directory, verifies
+        no HF artifacts are present, then saves to a separate HF directory
+        and verifies no mistral artifacts leaked.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mistral_dir = Path(tmpdir) / "mistral"
+            hf_dir = Path(tmpdir) / "hf"
+
+            _download_mistral_files(self.model_id, mistral_dir)
+            _assert_mistral_dir(mistral_dir)
+
+            model, loading_info = Mistral4ForCausalLM.from_pretrained(
+                str(mistral_dir),
+                mistral_format=True,
+                device_map="auto",
+                torch_dtype=torch.bfloat16,
+                output_loading_info=True,
+            )
+            unexpected = _filter_expected_unexpected_keys(loading_info["unexpected_keys"])
+            assert not unexpected, f"Unexpected keys during native load: {unexpected}"
+            assert not loading_info["missing_keys"], f"Missing keys during native load: {loading_info['missing_keys']}"
+            original_config = model.config
+            original_sd = {k: v.clone().cpu() for k, v in model.state_dict().items()}
+
+            model.save_pretrained(str(hf_dir), save_format="hf")
+            del model
+            backend_empty_cache(torch_device)
+            gc.collect()
+
+            _assert_hf_dir(hf_dir)
+
+            reloaded_config = AutoConfig.from_pretrained(str(hf_dir))
+            _assert_config_matches(original_config, reloaded_config)
+
+            original_tok = AutoTokenizer.from_pretrained(str(mistral_dir))
+            original_tok.save_pretrained(str(hf_dir))
+            reloaded_tok = AutoTokenizer.from_pretrained(str(hf_dir))
+            assert reloaded_tok.vocab_size == original_tok.vocab_size
+            test_text = "Hello, world!"
+            assert reloaded_tok.encode(test_text) == original_tok.encode(test_text)
+            assert reloaded_tok.decode(reloaded_tok.encode(test_text), skip_special_tokens=True) == test_text
+
+            reloaded, reload_info = Mistral4ForCausalLM.from_pretrained(
+                str(hf_dir), device_map="auto", torch_dtype=torch.bfloat16, output_loading_info=True
+            )
+            assert not reload_info["unexpected_keys"], (
+                f"Unexpected keys during HF reload: {reload_info['unexpected_keys']}"
+            )
+            assert not reload_info["missing_keys"], f"Missing keys during HF reload: {reload_info['missing_keys']}"
+            reloaded_sd = reloaded.state_dict()
+
+            for key in original_sd:
+                assert torch.equal(original_sd[key], reloaded_sd[key].cpu()), f"Roundtrip mismatch for {key}"
+
+            del reloaded
+            backend_empty_cache(torch_device)
+            gc.collect()
