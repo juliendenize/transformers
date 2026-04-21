@@ -22,8 +22,8 @@ import pytest
 
 from transformers import Ministral3Config, Mistral3Config, Mistral4Config, MistralConfig
 from transformers.integrations.mistral.config_format import (
-    _CONSOLIDATED_INDEX,
-    _CONSOLIDATED_SINGLE,
+    _CONSOLIDATED_INDEX_FILE,
+    _CONSOLIDATED_SINGLE_FILE,
     _HF_INDEX,
     _HF_SINGLE,
     MistralFormatConfig,
@@ -56,11 +56,11 @@ class TestMistralFormat:
         [
             ({_HF_SINGLE}, None),
             ({_HF_INDEX}, None),
-            ({_CONSOLIDATED_SINGLE}, _CONSOLIDATED_SINGLE),
-            ({_CONSOLIDATED_INDEX}, _CONSOLIDATED_INDEX),
+            ({_CONSOLIDATED_SINGLE_FILE}, _CONSOLIDATED_SINGLE_FILE),
+            ({_CONSOLIDATED_INDEX_FILE}, _CONSOLIDATED_INDEX_FILE),
             (set(), None),
-            ({_HF_SINGLE, _CONSOLIDATED_SINGLE}, None),
-            ({_HF_INDEX, _CONSOLIDATED_SINGLE}, None),
+            ({_HF_SINGLE, _CONSOLIDATED_SINGLE_FILE}, None),
+            ({_HF_INDEX, _CONSOLIDATED_SINGLE_FILE}, None),
         ],
         ids=[
             "hf_single",
@@ -103,7 +103,7 @@ class TestMistralFormat:
         _write_params_json(tmp_path, mistral_params)
         (tmp_path / "consolidated.safetensors").write_bytes(b"\x00")
         config_dict, _ = MistralConfig.get_config_dict(tmp_path)
-        assert config_dict["transformers_weights"] == _CONSOLIDATED_SINGLE
+        assert config_dict["transformers_weights"] == _CONSOLIDATED_SINGLE_FILE
 
     @pytest.mark.parametrize(
         "config_cls, params_fixture, skip_keys",

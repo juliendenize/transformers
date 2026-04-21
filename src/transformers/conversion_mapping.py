@@ -105,7 +105,7 @@ _MODEL_TO_CONVERSION_PATTERN = {
 # in get_model_conversion_mapping() will skip those children, preventing duplicate or
 # conflicting converters from being added.
 _COVERED_SUBMODULE_MODEL_TYPES: dict[str, set[str]] = {
-    "mistral3": {"mistral", "ministral3"},
+    "mistral3": {"mistral", "ministral3", "mistral4"},
 }
 
 

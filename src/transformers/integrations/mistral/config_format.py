@@ -23,6 +23,8 @@ import dataclasses
 import json
 from typing import Any
 
+from huggingface_hub.constants import SAFETENSORS_INDEX_FILE, SAFETENSORS_SINGLE_FILE
+
 from ...configuration_utils import PreTrainedConfig
 from ...utils import cached_file, logging
 
@@ -30,10 +32,8 @@ from ...utils import cached_file, logging
 logger = logging.get_logger(__name__)
 
 # Weight file names
-_CONSOLIDATED_SINGLE = "consolidated.safetensors"
-_CONSOLIDATED_INDEX = "consolidated.safetensors.index.json"
-_HF_SINGLE = "model.safetensors"
-_HF_INDEX = "model.safetensors.index.json"
+_CONSOLIDATED_SINGLE_FILE = "consolidated.safetensors"
+_CONSOLIDATED_INDEX_FILE = "consolidated.safetensors.index.json"
 _PARAMS_JSON = "params.json"
 
 
@@ -183,7 +183,7 @@ class MistralFormatConfig(PreTrainedConfig):
         Returns:
             Weight filename if consolidated format detected, `None` otherwise.
         """
-        for hf_filename in (_HF_SINGLE, _HF_INDEX):
+        for hf_filename in (SAFETENSORS_SINGLE_FILE, SAFETENSORS_INDEX_FILE):
             resolved = cached_file(
                 pretrained_model_name_or_path,
                 hf_filename,
@@ -194,7 +194,7 @@ class MistralFormatConfig(PreTrainedConfig):
             if resolved is not None:
                 return None
 
-        for native_filename in (_CONSOLIDATED_INDEX, _CONSOLIDATED_SINGLE):
+        for native_filename in (_CONSOLIDATED_INDEX_FILE, _CONSOLIDATED_SINGLE_FILE):
             resolved = cached_file(
                 pretrained_model_name_or_path,
                 native_filename,
