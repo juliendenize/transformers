@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-r"""Tests for Mistral native config <-> HF config conversions."""
 
 import pytest
 
@@ -23,9 +22,9 @@ from transformers.integrations.mistral.params_conversion import (
     QuantizationArgs,
     VisionEncoderArgs,
     YarnArgs,
-    get_maybe_quant_config,
-    hf_config_to_native_config,
-    native_config_to_hf_config,
+    _get_maybe_quant_config,
+    _hf_config_to_native_config,
+    _native_config_to_hf_config,
 )
 from transformers.models.pixtral.configuration_pixtral import PixtralVisionConfig
 from transformers.quantizers.auto import AutoQuantizationConfig
@@ -91,9 +90,6 @@ def moe_args() -> MOEModelArgs:
         routed_scale=1.0,
         num_expert_groups=1,
         num_expert_groups_per_tok=1,
-        expert_parallel=1,
-        expert_model_parallel=1,
-        route_every_n=1,
     )
 
 
@@ -317,10 +313,10 @@ class TestQuantizationArgs:
 
 class TestGetMaybeQuantConfig:
     def test_none_returns_none(self) -> None:
-        assert get_maybe_quant_config(is_vision_model=False, quantization_args=None) is None
+        assert _get_maybe_quant_config(is_vision_model=False, quantization_args=None) is None
 
     def test_tensor_produces_static(self) -> None:
-        qc = get_maybe_quant_config(
+        qc = _get_maybe_quant_config(
             is_vision_model=False,
             quantization_args=QuantizationArgs("fp8_e4m3", "TENSOR"),
         )
@@ -329,7 +325,7 @@ class TestGetMaybeQuantConfig:
         assert qc_dict["activation_scheme"] == "static"
 
     def test_vision_model_adds_modules_to_skip(self) -> None:
-        qc = get_maybe_quant_config(
+        qc = _get_maybe_quant_config(
             is_vision_model=True,
             quantization_args=QuantizationArgs("fp8_e4m3", "TENSOR"),
         )
@@ -388,7 +384,7 @@ class TestMistralNativeConfig:
 def test_native_to_hf_mistral(
     base_native_config: MistralNativeConfig, expected_mistral_hf_config: MistralConfig
 ) -> None:
-    hf = native_config_to_hf_config(base_native_config)
+    hf = _native_config_to_hf_config(base_native_config)
     assert isinstance(hf, MistralConfig)
     assert hf == expected_mistral_hf_config
 
@@ -396,7 +392,7 @@ def test_native_to_hf_mistral(
 def test_native_to_hf_ministral3(
     ministral3_native_config: MistralNativeConfig, expected_ministral3_hf_config: Ministral3Config
 ) -> None:
-    hf = native_config_to_hf_config(ministral3_native_config)
+    hf = _native_config_to_hf_config(ministral3_native_config)
     assert isinstance(hf, Ministral3Config)
     assert hf == expected_ministral3_hf_config
 
@@ -404,7 +400,7 @@ def test_native_to_hf_ministral3(
 def test_native_to_hf_mistral4(
     mistral4_native_config: MistralNativeConfig, expected_mistral4_hf_config: Mistral4Config
 ) -> None:
-    hf = native_config_to_hf_config(mistral4_native_config)
+    hf = _native_config_to_hf_config(mistral4_native_config)
     assert isinstance(hf, Mistral4Config)
     assert hf == expected_mistral4_hf_config
 
@@ -413,7 +409,7 @@ class TestNativeToHFMistral3:
     def test_vision_model(
         self, mistral3_native_config: MistralNativeConfig, expected_mistral3_hf_config: Mistral3Config
     ) -> None:
-        hf = native_config_to_hf_config(mistral3_native_config)
+        hf = _native_config_to_hf_config(mistral3_native_config)
         assert isinstance(hf, Mistral3Config)
         assert hf == expected_mistral3_hf_config
 
@@ -432,7 +428,7 @@ class TestNativeToHFMistral3:
             quantization=QuantizationArgs("fp8_e4m3", "TENSOR"),
             vision_encoder=vision_encoder_args,
         )
-        hf = native_config_to_hf_config(native)
+        hf = _native_config_to_hf_config(native)
         qc = hf.quantization_config
         if hasattr(qc, "to_dict"):
             qc = qc.to_dict()
@@ -454,7 +450,7 @@ class TestQuantizationConfigPassthrough:
             max_position_embeddings=32768,
             quantization_config=_make_hf_fp8_quant_config("dynamic"),
         )
-        hf = native_config_to_hf_config(native)
+        hf = _native_config_to_hf_config(native)
         qc_dict = hf.quantization_config.to_dict()
         assert qc_dict["activation_scheme"] == "dynamic"
         assert qc_dict["quant_method"] == "fp8"
@@ -473,7 +469,7 @@ class TestQuantizationConfigPassthrough:
             max_position_embeddings=32768,
             quantization=QuantizationArgs("fp8_e4m3", "TENSOR"),
         )
-        hf = native_config_to_hf_config(native)
+        hf = _native_config_to_hf_config(native)
         qc_dict = hf.quantization_config.to_dict()
         assert qc_dict["activation_scheme"] == "static"
 
@@ -492,11 +488,11 @@ class TestHFToNativeMistral:
             max_position_embeddings=32768,
             sliding_window=None,
         )
-        native = hf_config_to_native_config(hf)
+        native = _hf_config_to_native_config(hf)
         assert native == base_native_config
 
     def test_roundtrip(self, base_native_config: MistralNativeConfig) -> None:
-        restored = hf_config_to_native_config(native_config_to_hf_config(base_native_config))
+        restored = _hf_config_to_native_config(_native_config_to_hf_config(base_native_config))
         assert restored == base_native_config
 
     def test_reverse_with_quantization_config(self, base_native_config: MistralNativeConfig) -> None:
@@ -513,7 +509,7 @@ class TestHFToNativeMistral:
             sliding_window=None,
             quantization_config=_make_hf_fp8_quant_config(),
         )
-        native = hf_config_to_native_config(hf)
+        native = _hf_config_to_native_config(hf)
         assert native.quantization is None
         assert native.quantization_config is not None
         assert isinstance(native.quantization_config, QuantizationConfigMixin)
@@ -558,11 +554,11 @@ class TestHFToNativeMinistral3:
                 "llama_4_scaling_beta": 0.1,
             },
         )
-        native = hf_config_to_native_config(hf)
+        native = _hf_config_to_native_config(hf)
         assert native == ministral3_native_config
 
     def test_roundtrip(self, ministral3_native_config: MistralNativeConfig) -> None:
-        restored = hf_config_to_native_config(native_config_to_hf_config(ministral3_native_config))
+        restored = _hf_config_to_native_config(_native_config_to_hf_config(ministral3_native_config))
         assert restored == ministral3_native_config
 
     def test_roundtrip_with_quantization(self, yarn_args: YarnArgs, llama4_scaling: Llama4Scaling) -> None:
@@ -582,8 +578,8 @@ class TestHFToNativeMinistral3:
             llama_4_scaling=llama4_scaling,
             quantization=QuantizationArgs("fp8_e4m3", "TENSOR"),
         )
-        hf = native_config_to_hf_config(native)
-        restored = hf_config_to_native_config(hf)
+        hf = _native_config_to_hf_config(native)
+        restored = _hf_config_to_native_config(hf)
         assert restored.quantization is None
         assert restored.quantization_config is not None
         qc_dict = restored.quantization_config.to_dict()
@@ -633,11 +629,11 @@ class TestHFToNativeMistral4:
             n_group=1,
             topk_group=1,
         )
-        native = hf_config_to_native_config(hf)
+        native = _hf_config_to_native_config(hf)
         assert native == mistral4_native_config
 
     def test_roundtrip(self, mistral4_native_config: MistralNativeConfig) -> None:
-        restored = hf_config_to_native_config(native_config_to_hf_config(mistral4_native_config))
+        restored = _hf_config_to_native_config(_native_config_to_hf_config(mistral4_native_config))
         assert restored == mistral4_native_config
 
 
@@ -674,11 +670,11 @@ class TestHFToNativeMistral3:
             spatial_merge_size=2,
             vision_feature_layer=-1,
         )
-        native = hf_config_to_native_config(hf)
+        native = _hf_config_to_native_config(hf)
         assert native == mistral3_native_config
 
     def test_roundtrip_ignores_non_roundtrippable_fields(self, mistral3_native_config: MistralNativeConfig) -> None:
-        restored = hf_config_to_native_config(native_config_to_hf_config(mistral3_native_config))
+        restored = _hf_config_to_native_config(_native_config_to_hf_config(mistral3_native_config))
         assert restored == mistral3_native_config
 
 
@@ -686,7 +682,7 @@ def test_unsupported_hf_config_type_raises() -> None:
     from transformers.configuration_utils import PreTrainedConfig
 
     with pytest.raises(ValueError, match="Unsupported HF config type"):
-        hf_config_to_native_config(PreTrainedConfig())
+        _hf_config_to_native_config(PreTrainedConfig())
 
 
 def test_forward_moe_without_mla_raises(moe_args: MOEModelArgs) -> None:
@@ -704,4 +700,4 @@ def test_forward_moe_without_mla_raises(moe_args: MOEModelArgs) -> None:
         moe=moe_args,
     )
     with pytest.raises(ValueError, match="MOE and MLA"):
-        native_config_to_hf_config(native)
+        _native_config_to_hf_config(native)

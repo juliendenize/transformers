@@ -283,7 +283,7 @@ from transformers.core_model_loading import PermuteForRope, WeightConverter, Wei
 from transformers.integrations.mistral.weight_conversion import (
     FP8AwareMergeAndConcatenate,
     FP8AwareSplitAndUnstack,
-    fp8_scale_renamings,
+    _fp8_scale_renamings,
     mistral3_native_text_renamings,
     mistral3_native_vision_converters,
     mistral3_native_vision_renamings,
@@ -342,7 +342,7 @@ After tests are written and failing:
      - Reverse: split fused tensor along dim=1, unstack along dim=0
      - `reverse_op` returns `FP8AwareMergeAndConcatenate()`
    - Factory functions: `mistral_base_native_renamings()`, `mistral_base_native_converters()`,
-     `fp8_scale_renamings()`, `mistral3_native_text_renamings()`, `mistral3_native_text_converters()`,
+     `_fp8_scale_renamings()`, `mistral3_native_text_renamings()`, `mistral3_native_text_converters()`,
      `mistral3_native_vision_renamings()`, `mistral3_native_vision_converters()`,
      `mistral4_native_renamings()`, `mistral4_native_converters()`
 
@@ -597,11 +597,11 @@ After tests are written and failing:
 1. Register all model types in `conversion_mapping.py`'s `_build_checkpoint_conversion_mapping()`:
    ```python
    mapping["mistral"] = mistral_base_native_renamings() + mistral_base_native_converters()
-   mapping["ministral3"] = mistral_base_native_renamings() + mistral_base_native_converters() + fp8_scale_renamings()
+   mapping["ministral3"] = mistral_base_native_renamings() + mistral_base_native_converters() + _fp8_scale_renamings()
    mapping["mistral3"] = mapping["llava"].copy() + mistral3_native_text_renamings() + mistral3_native_text_converters()
                           + mistral3_native_vision_renamings() + mistral3_native_vision_converters()
-                          + fp8_scale_renamings()
-   mapping["mistral4"] = mistral4_native_renamings() + fp8_scale_renamings() + mistral4_native_converters()
+                          + _fp8_scale_renamings()
+   mapping["mistral4"] = mistral4_native_renamings() + _fp8_scale_renamings() + mistral4_native_converters()
    ```
 
 2. Remove `"mistral3": "llava"` alias from `_MODEL_TO_CONVERSION_PATTERN` (now explicit).

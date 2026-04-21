@@ -11,28 +11,27 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-r"""Tests for Phase 4: config format detection and loading."""
 
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from huggingface_hub.constants import SAFETENSORS_INDEX_FILE, SAFETENSORS_SINGLE_FILE
 
 from transformers import Ministral3Config, Mistral3Config, Mistral4Config, MistralConfig
 from transformers.integrations.mistral.config_format import (
     _CONSOLIDATED_INDEX_FILE,
     _CONSOLIDATED_SINGLE_FILE,
-    _HF_INDEX,
-    _HF_SINGLE,
     MistralFormatConfig,
 )
 from transformers.integrations.mistral.params_conversion import native_config_for_model_type
 
 
-def _make_cached_file_side_effect(existing_files: set[str]):
-    def _side_effect(path, filename, **kwargs):
+def _make_cached_file_side_effect(existing_files: set[str]) -> Callable[..., str | None]:
+    def _side_effect(path: str, filename: str, **kwargs) -> str | None:
         if filename in existing_files:
             return os.path.join(str(path), filename)
         return None
@@ -54,13 +53,13 @@ class TestMistralFormat:
     @pytest.mark.parametrize(
         "existing_files, expected",
         [
-            ({_HF_SINGLE}, None),
-            ({_HF_INDEX}, None),
+            ({SAFETENSORS_SINGLE_FILE}, None),
+            ({SAFETENSORS_INDEX_FILE}, None),
             ({_CONSOLIDATED_SINGLE_FILE}, _CONSOLIDATED_SINGLE_FILE),
             ({_CONSOLIDATED_INDEX_FILE}, _CONSOLIDATED_INDEX_FILE),
             (set(), None),
-            ({_HF_SINGLE, _CONSOLIDATED_SINGLE_FILE}, None),
-            ({_HF_INDEX, _CONSOLIDATED_SINGLE_FILE}, None),
+            ({SAFETENSORS_SINGLE_FILE, _CONSOLIDATED_SINGLE_FILE}, None),
+            ({SAFETENSORS_INDEX_FILE, _CONSOLIDATED_SINGLE_FILE}, None),
         ],
         ids=[
             "hf_single",
@@ -72,34 +71,47 @@ class TestMistralFormat:
             "hf_index_and_consolidated_single",
         ],
     )
-    def test_detect_weight_file(self, existing_files, expected):
+    def test_detect_weight_file(self, existing_files: set[str], expected: str | None) -> None:
         assert self._detect(existing_files) == expected
 
-    def test_get_config_dict_prefers_config_json(self, mistral_params, tmp_path):
-        MistralConfig().save_pretrained(tmp_path)
+    @pytest.mark.parametrize(
+        "save_config_json, mistral_format, expect_mistral_format",
+        [
+            (True, None, False),
+            (False, None, True),
+            (True, True, True),
+        ],
+        ids=[
+            "prefers_config_json",
+            "falls_back_to_params_json",
+            "mistral_format_true_forces_params",
+        ],
+    )
+    def test_loaded_from_mistral_format(
+        self,
+        save_config_json: bool,
+        mistral_format: bool | None,
+        expect_mistral_format: bool,
+        mistral_params: dict,
+        tmp_path: Path,
+    ) -> None:
+        if save_config_json:
+            MistralConfig().save_pretrained(tmp_path)
         _write_params_json(tmp_path, mistral_params)
-        config_dict, _ = MistralConfig.get_config_dict(tmp_path)
+        kwargs = {} if mistral_format is None else {"mistral_format": mistral_format}
+        config_dict, _ = MistralConfig.get_config_dict(tmp_path, **kwargs)
         assert isinstance(config_dict, dict)
-        assert "_loaded_from_mistral_format" not in config_dict
+        if expect_mistral_format:
+            assert config_dict["_loaded_from_mistral_format"]
+        else:
+            assert "_loaded_from_mistral_format" not in config_dict
 
-    def test_get_config_dict_falls_back_to_params_json(self, mistral_params, tmp_path):
-        _write_params_json(tmp_path, mistral_params)
-        config_dict, _ = MistralConfig.get_config_dict(tmp_path)
-        assert isinstance(config_dict, dict)
-        assert config_dict["_loaded_from_mistral_format"]
-
-    def test_get_config_dict_mistral_format_true_forces_params(self, mistral_params, tmp_path):
-        MistralConfig().save_pretrained(tmp_path)
-        _write_params_json(tmp_path, mistral_params)
-        config_dict, _ = MistralConfig.get_config_dict(tmp_path, mistral_format=True)
-        assert config_dict["_loaded_from_mistral_format"]
-
-    def test_get_config_dict_mistral_format_false_errors(self, mistral_params, tmp_path):
+    def test_get_config_dict_mistral_format_false_errors(self, mistral_params: dict, tmp_path: Path) -> None:
         _write_params_json(tmp_path, mistral_params)
         with pytest.raises(OSError):
             MistralConfig.get_config_dict(tmp_path, mistral_format=False)
 
-    def test_get_config_dict_sets_transformers_weights(self, mistral_params, tmp_path):
+    def test_get_config_dict_sets_transformers_weights(self, mistral_params: dict, tmp_path: Path) -> None:
         _write_params_json(tmp_path, mistral_params)
         (tmp_path / "consolidated.safetensors").write_bytes(b"\x00")
         config_dict, _ = MistralConfig.get_config_dict(tmp_path)
@@ -114,7 +126,14 @@ class TestMistralFormat:
         ],
         ids=["mistral", "ministral3", "mistral4"],
     )
-    def test_config_to_params_json(self, config_cls, params_fixture, skip_keys, request, tmp_path):
+    def test_config_to_params_json(
+        self,
+        config_cls: type,
+        params_fixture: str,
+        skip_keys: set[str],
+        request: pytest.FixtureRequest,
+        tmp_path: Path,
+    ) -> None:
         params = request.getfixturevalue(params_fixture)
         _write_params_json(tmp_path, params)
         config = config_cls.from_pretrained(tmp_path)
@@ -139,7 +158,9 @@ class TestMistralFormat:
         ],
         ids=["mistral", "ministral3", "mistral4", "mistral3"],
     )
-    def test_from_pretrained(self, config_cls, params_fixture, request, tmp_path):
+    def test_from_pretrained(
+        self, config_cls: type, params_fixture: str, request: pytest.FixtureRequest, tmp_path: Path
+    ) -> None:
         params = request.getfixturevalue(params_fixture)
         _write_params_json(tmp_path, params)
         loaded = config_cls.from_pretrained(tmp_path)

@@ -9,15 +9,17 @@ from tqdm import tqdm
 
 from transformers.convert_slow_tokenizer import bytes_to_unicode
 from transformers.tokenization_utils_tokenizers import PreTrainedTokenizerFast
-from transformers.utils.import_utils import is_mistral_common_available, requires
 
-
-if is_mistral_common_available():
-    from mistral_common.tokens.tokenizers.base import SpecialTokens
-    from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 
 if TYPE_CHECKING:
     from transformers.models.pixtral.processing_pixtral import PixtralProcessor
+
+MAP_SPECIALS = {
+    "bos_token": "<s>",
+    "eos_token": "</s>",
+    "pad_token": "<pad>",
+    "unk_token": "<unk>",
+}
 
 
 class MistralConverter:
@@ -33,13 +35,15 @@ class MistralConverter:
         vocab: dict | None = None,
         pattern: str = r"""(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+""",
         add_prefix_space: bool = False,
-        additional_special_tokens: list[str] | None = None,
+        additional_special_tokens: list[AddedToken] | None = None,
         **kwargs,
     ):
         self.vocab = vocab
         self.pattern = pattern
         self.add_prefix_space = add_prefix_space
         self.additional_special_tokens = additional_special_tokens
+        self._precomputed_vocab: dict[str, int] | None = None
+        self._precomputed_merges: list[tuple[str, str]] | None = None
 
     @classmethod
     def from_tekken_file(
@@ -61,9 +65,8 @@ class MistralConverter:
             untyped = json.load(f)
 
         pattern = untyped["config"]["pattern"]
-        additional_special_tokens = [
-            AddedToken(k["token_str"], special=k["is_control"]) for k in untyped["special_tokens"]
-        ]
+
+        additional_special_tokens = [AddedToken(k["token_str"], special=True) for k in untyped["special_tokens"]]
         bpe_ranks_raw = untyped["vocab"]
         byte_encoder = bytes_to_unicode()
 
@@ -71,6 +74,7 @@ class MistralConverter:
         def token_bytes_to_string(b: bytes) -> str:
             return "".join([byte_encoder[ord(char)] for char in b.decode("latin-1")])
 
+        local_tuples: list[tuple[str, str, str]] = []
         merges: list[tuple[str, str]] = []
         vocab: dict[str, int] = {}
         for idx, token in enumerate(additional_special_tokens):
@@ -90,9 +94,9 @@ class MistralConverter:
                 if piece_l in rank_set and piece_r in rank_set and (piece_l + piece_r) in rank_set:
                     local.append((piece_l, piece_r, rank))
             local = sorted(local, key=lambda x: (token_to_rank[x[0]], token_to_rank[x[1]]))
-            merges.extend(local)
-        merges = sorted(merges, key=lambda val: val[2])
-        merges = [(token_bytes_to_string(val[0]), token_bytes_to_string(val[1])) for val in merges]
+            local_tuples.extend(local)
+        local_tuples = sorted(local_tuples, key=lambda val: val[2])
+        merges = [(token_bytes_to_string(val[0]), token_bytes_to_string(val[1])) for val in local_tuples]
 
         instance = cls(
             vocab=None,
@@ -103,6 +107,7 @@ class MistralConverter:
         # Store pre-computed vocab and merges so tokenizer() can use them directly
         instance._precomputed_vocab = vocab
         instance._precomputed_merges = merges
+
         return instance
 
     def extract_vocab_merges_from_model(self, vocab: dict) -> tuple[dict[str, int], list[tuple[str, str]]]:
@@ -135,7 +140,7 @@ class MistralConverter:
 
     def tokenizer(self) -> Tokenizer:
         r"""Build a raw `tokenizers.Tokenizer` with BPE model (no pre/post-processing)."""
-        if hasattr(self, "_precomputed_vocab"):
+        if self._precomputed_vocab:
             vocab_scores, merges = self._precomputed_vocab, self._precomputed_merges
         else:
             vocab_scores, merges = self.extract_vocab_merges_from_model(self.vocab)
@@ -161,51 +166,12 @@ class MistralConverter:
         return tokenizer
 
 
-@requires(backends=("mistral-common",))
-def convert_tekken_tokenizer(tokenizer_file: str):
-    """Convert a "tekken" tokenizer to a fast Tokenizer."""
-    # Load directly using their lib
-    mistral_tokenizer = MistralTokenizer.from_file(tokenizer_file)
-
-    # Extract vocab and special tokens
-    vocab = mistral_tokenizer.instruct_tokenizer.tokenizer._tekken_token2id_nospecial
-    sorted_tokens = sorted(mistral_tokenizer.instruct_tokenizer.tokenizer._all_special_tokens, key=lambda x: x["rank"])
-    all_special = [token["token_str"] for token in sorted_tokens]
-
-    specials_tokens = {token: idx for idx, token in enumerate(all_special)}
-
-    specials_tokens.update(vocab)
-    vocab = specials_tokens
-
-    # TODO(juliendenize): expose this in mistral-common to avoid accessing private attributes
-    # and improve maintainability
-    pattern = mistral_tokenizer.instruct_tokenizer.tokenizer._model._pat_str
-
-    # Convert
-    tokenizer = PreTrainedTokenizerFast(
-        tokenizer_object=MistralConverter(
-            vocab=vocab, additional_special_tokens=all_special, pattern=pattern
-        ).converted()
-    )
-
-    # Post-process
-    tokenizer.add_special_tokens({"additional_special_tokens": all_special})
-
-    MAP_SPECAL = {
-        "bos_token": SpecialTokens.bos.value,
-        "eos_token": SpecialTokens.eos.value,
-        "pad_token": SpecialTokens.pad.value,
-        "unk_token": SpecialTokens.unk.value,
-    }
-
-    for special_key, special_token in MAP_SPECAL.items():
-        if special_token in all_special:
-            tokenizer.add_special_tokens({special_key: special_token})
-
-    return tokenizer
+def convert_tekken_tokenizer(tokenizer_file: str) -> PreTrainedTokenizerFast:
+    slow = MistralConverter.from_tekken_file(vocab_file=tokenizer_file, add_prefix_space=False).converted()
+    fast = PreTrainedTokenizerFast(tokenizer_object=slow, **MAP_SPECIALS)
+    return fast
 
 
-@requires(backends=("mistral-common",))
 def convert_tekken_processor(
     tokenizer_file: str,
     params_file: str,
@@ -239,9 +205,9 @@ def convert_tekken_processor(
     processor = PixtralProcessor(
         tokenizer=tokenizer,
         image_processor=image_processor,
-        image_token=SpecialTokens.img.value,
-        image_break_token=SpecialTokens.img_break.value,
-        image_end_token=SpecialTokens.img_end.value,
+        image_token="[IMG]",
+        image_break_token="[IMG_BREAK]",
+        image_end_token="[IMG_END]",
         patch_size=patch_size,
         spatial_merge_size=spatial_merge_size,
         chat_template=chat_template,

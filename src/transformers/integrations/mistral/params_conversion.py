@@ -31,6 +31,9 @@ from ...models.pixtral.configuration_pixtral import PixtralVisionConfig
 from ...utils.quantization_config import QuantizationConfigMixin
 
 
+_QUANTIZATION_SCHEME_MAP = {"TENSOR": "static"}
+
+
 class MistralModelType(str, Enum):
     MISTRAL = "mistral"
     MINISTRAL3 = "ministral3"
@@ -62,15 +65,15 @@ def _extract_yarn(config: PreTrainedConfig) -> YarnArgs | None:
     return YarnArgs(
         factor=rope_params["factor"],
         original_max_position_embeddings=rope_params["original_max_position_embeddings"],
-        beta=rope_params.get("beta_fast", 32.0),
-        alpha=rope_params.get("beta_slow", 1.0),
+        beta=int(rope_params["beta_fast"]),
+        alpha=int(rope_params["beta_slow"]),
     )
 
 
 @dataclass
 class Llama4Scaling:
     original_max_position_embeddings: int
-    beta: float = 0.1
+    beta: float
 
 
 @dataclass
@@ -93,8 +96,10 @@ class QuantizationArgs:
     _SUPPORTED_SCHEMES: frozenset[str] = frozenset({"TENSOR"})
 
     def __post_init__(self) -> None:
-        if self.qformat_weight != "fp8_e4m3":
-            raise ValueError(f"Unsupported quantization format {self.qformat_weight!r}; only 'fp8_e4m3' is supported.")
+        if self.qformat_weight not in list(QFormat):
+            raise ValueError(
+                f"Unsupported quantization format {self.qformat_weight!r}; only {[q.value for q in QFormat]} are supported."
+            )
         if self.qscheme_act not in self._SUPPORTED_SCHEMES:
             raise ValueError(
                 f"Unsupported quantization scheme {self.qscheme_act!r}; "
@@ -104,9 +109,6 @@ class QuantizationArgs:
 
 @dataclass
 class MOEModelArgs:
-    expert_parallel: int
-    expert_model_parallel: int
-    route_every_n: int
     first_k_dense_replace: int
     num_experts: int
     num_experts_per_tok: int
@@ -115,6 +117,9 @@ class MOEModelArgs:
     routed_scale: float
     expert_hidden_dim: int
     num_shared_experts: int
+    expert_parallel: int = 1
+    expert_model_parallel: int = 1
+    route_every_n: int = 1
 
 
 @dataclass
@@ -148,7 +153,7 @@ class MistralNativeConfig:
     rope_theta: float
     norm_eps: float
     vocab_size: int
-    max_position_embeddings: int
+    max_position_embeddings: int | None = None
     sliding_window: int | None = None
     tied_embeddings: bool = False
     llama_4_scaling: Llama4Scaling | None = None
@@ -172,35 +177,39 @@ class MistralNativeConfig:
 
     def to_hf_config(self) -> MistralHFConfigType:
         r"""Convert this native config to the corresponding HF config."""
-        return native_config_to_hf_config(self)
+        return _native_config_to_hf_config(self)
 
 
-def native_config_to_hf_config(native_config: MistralNativeConfig) -> MistralHFConfigType:
+def _native_config_to_hf_config(native_config: MistralNativeConfig) -> MistralHFConfigType:
+    r"""Map Mistral config to the correct model config in Transformers.
+
+    The mapping is the following:
+    - If it has vision, it is mapped to Mistral 3 that will resolve sub text config using the same function.
+    - If it is a MOE, it should also be MLA and it is mapped to Mistral 4.
+    - If it has yarn, it is mapped to Ministral 3 else to Mistral.
+    """
     is_moe = native_config.moe is not None
     is_mla = native_config.q_lora_rank is not None
     has_vision = native_config.vision_encoder is not None
-    has_llama4_scaling = native_config.llama_4_scaling is not None
+    has_yarn = native_config.yarn is not None
 
-    match has_vision, is_moe, is_mla, has_llama4_scaling:
-        case True, _, _, _:
-            return native_config_to_mistral3(native_config=native_config)
-        case (False, True, False, _) | (False, False, True, _):
-            raise ValueError(
-                "MOE and MLA config are only supported together. Please ensure to have a valid model config."
-            )
-        case False, True, True, False:
-            raise ValueError("MOE config is only supported with llama4 scaling. Please ensure to have a valid config.")
-        case False, True, True, True:
-            return native_config_to_mistral4(native_config=native_config)
-        case False, False, False, True:
-            return native_config_to_ministral3(native_config=native_config)
-        case False, False, False, False:
-            return native_config_to_mistral(native_config=native_config)
+    if not (is_moe == is_mla):
+        raise ValueError("MOE and MLA config are only supported together. Please ensure to have a valid model config.")
+
+    match has_vision, is_moe, has_yarn:
+        case True, _, _:
+            return __native_config_to_mistral3(native_config=native_config)
+        case False, True, _:
+            return __native_config_to_mistral4(native_config=native_config)
+        case False, False, True:
+            return _native_config_to_ministral3(native_config=native_config)
+        case False, False, False:
+            return _native_config_to_mistral(native_config=native_config)
         case _:
             raise ValueError("Unknown config.")
 
 
-def get_maybe_quant_config(
+def _get_maybe_quant_config(
     is_vision_model: bool, quantization_args: QuantizationArgs | None
 ) -> AutoQuantizationConfig | None:
     if quantization_args is None:
@@ -210,11 +219,9 @@ def get_maybe_quant_config(
     if is_vision_model:
         modules_to_not_convert += ["model.vision_tower", "model.multi_modal_projector"]
 
-    _SCHEME_MAP = {"TENSOR": "static"}
-
     match quantization_args.qformat_weight:
         case QFormat.FP8_E4M3:
-            activation_scheme = _SCHEME_MAP.get(quantization_args.qscheme_act)
+            activation_scheme = _QUANTIZATION_SCHEME_MAP.get(quantization_args.qscheme_act)
             if activation_scheme is None:
                 raise ValueError(f"invalid quantization config {quantization_args.qscheme_act=}.")
             quantization_config = {
@@ -228,7 +235,7 @@ def get_maybe_quant_config(
             raise ValueError(f"invalid quantization config {quantization_args.qformat_weight=}.")
 
 
-def get_rope_parameters(
+def _get_rope_parameters(
     rope_theta: float,
     yarn_args: YarnArgs | None,
     llama4_scaling: Llama4Scaling | None,
@@ -243,7 +250,7 @@ def get_rope_parameters(
 
     if yarn_args is None:
         return RopeParameters(rope_type="default", rope_theta=rope_theta, **rope_kwargs)
-    if llama4_scaling is not None:
+    elif llama4_scaling is not None:
         assert yarn_args.original_max_position_embeddings == llama4_scaling.original_max_position_embeddings, (
             "yarn and llama4 scaling config mismatch."
         )
@@ -261,12 +268,12 @@ def get_rope_parameters(
     )
 
 
-def native_config_to_mistral(native_config: MistralNativeConfig) -> MistralConfig:
-    assert native_config.llama_4_scaling is None
-    quant_config = native_config.quantization_config or get_maybe_quant_config(
+def _native_config_to_mistral(native_config: MistralNativeConfig) -> MistralConfig:
+    assert native_config.llama_4_scaling is None and native_config.yarn is None
+    quant_config = native_config.quantization_config or _get_maybe_quant_config(
         is_vision_model=False, quantization_args=native_config.quantization
     )
-    rope_parameters = get_rope_parameters(
+    rope_parameters = _get_rope_parameters(
         rope_theta=native_config.rope_theta,
         yarn_args=native_config.yarn,
         llama4_scaling=native_config.llama_4_scaling,
@@ -295,13 +302,12 @@ def native_config_to_mistral(native_config: MistralNativeConfig) -> MistralConfi
     )
 
 
-def native_config_to_ministral3(native_config: MistralNativeConfig) -> Ministral3Config:
-    assert native_config.yarn is not None
-    assert native_config.llama_4_scaling is not None
-    quant_config = native_config.quantization_config or get_maybe_quant_config(
+def _native_config_to_ministral3(native_config: MistralNativeConfig) -> Ministral3Config:
+    assert native_config.yarn is not None and native_config.llama_4_scaling is not None
+    quant_config = native_config.quantization_config or _get_maybe_quant_config(
         is_vision_model=False, quantization_args=native_config.quantization
     )
-    rope_parameters = get_rope_parameters(
+    rope_parameters = _get_rope_parameters(
         rope_theta=native_config.rope_theta,
         yarn_args=native_config.yarn,
         llama4_scaling=native_config.llama_4_scaling,
@@ -330,13 +336,11 @@ def native_config_to_ministral3(native_config: MistralNativeConfig) -> Ministral
     )
 
 
-def native_config_to_mistral4(native_config: MistralNativeConfig) -> Mistral4Config:
-    assert native_config.yarn is not None
-    assert native_config.llama_4_scaling is not None
-    quant_config = native_config.quantization_config or get_maybe_quant_config(
+def __native_config_to_mistral4(native_config: MistralNativeConfig) -> Mistral4Config:
+    quant_config = native_config.quantization_config or _get_maybe_quant_config(
         is_vision_model=False, quantization_args=native_config.quantization
     )
-    rope_parameters = get_rope_parameters(
+    rope_parameters = _get_rope_parameters(
         rope_theta=native_config.rope_theta,
         yarn_args=native_config.yarn,
         llama4_scaling=native_config.llama_4_scaling,
@@ -378,8 +382,7 @@ def native_config_to_mistral4(native_config: MistralNativeConfig) -> Mistral4Con
     )
 
 
-def native_config_to_mistral3(native_config: MistralNativeConfig) -> Mistral3Config:
-    r"""Convert a vision-enabled native config to a ``Mistral3Config``."""
+def __native_config_to_mistral3(native_config: MistralNativeConfig) -> Mistral3Config:
     assert native_config.vision_encoder is not None
     vision_config = native_config.vision_encoder
     vision_hf = PixtralVisionConfig(
@@ -393,7 +396,7 @@ def native_config_to_mistral3(native_config: MistralNativeConfig) -> Mistral3Con
         hidden_act="silu",
         rope_theta=vision_config.rope_theta,
     )
-    quant_config = native_config.quantization_config or get_maybe_quant_config(
+    quant_config = native_config.quantization_config or _get_maybe_quant_config(
         is_vision_model=True, quantization_args=native_config.quantization
     )
 
@@ -402,7 +405,7 @@ def native_config_to_mistral3(native_config: MistralNativeConfig) -> Mistral3Con
     native_text_config.quantization = None
     native_text_config.quantization_config = None
 
-    text_hf = native_config_to_hf_config(native_config=native_text_config)
+    text_hf = _native_config_to_hf_config(native_config=native_text_config)
 
     optional_kwargs: dict = {}
     if quant_config is not None:
@@ -420,18 +423,7 @@ def native_config_to_mistral3(native_config: MistralNativeConfig) -> Mistral3Con
     )
 
 
-# ---------------------------------------------------------------------------
-# Reverse conversion: HF config → MistralNativeConfig
-# ---------------------------------------------------------------------------
-
-
 def _extract_hf_quantization_config(hf_config: PreTrainedConfig) -> QuantizationConfigMixin | None:
-    r"""Extract the HF ``QuantizationConfigMixin`` from an HF config.
-
-    When the attribute is a raw dict it is promoted via
-    ``AutoQuantizationConfig.from_dict`` so the caller always receives a
-    proper config object (or ``None``).
-    """
     quant_cfg = getattr(hf_config, "quantization_config", None)
     if quant_cfg is None:
         return None
@@ -443,35 +435,24 @@ def _extract_hf_quantization_config(hf_config: PreTrainedConfig) -> Quantization
 
 
 def _extract_llama4_scaling_from_rope_params(rope_params: dict | RopeParameters | None) -> Llama4Scaling | None:
-    r"""Extract ``Llama4Scaling`` from HF ``rope_parameters``."""
-    if not rope_params or not isinstance(rope_params, dict):
+    if (
+        not rope_params
+        or not isinstance(rope_params, dict)
+        or (beta := rope_params.get("llama_4_scaling_beta")) is None
+    ):
         return None
-    beta = rope_params.get("llama_4_scaling_beta")
-    if beta is None:
-        return None
+
+    if (original_max_position_embeddings := rope_params.get("original_max_position_embeddings")) is None:
+        raise ValueError("original_max_position_embeddings should not be None if llama4 scaling is set.")
+
     return Llama4Scaling(
-        original_max_position_embeddings=rope_params["original_max_position_embeddings"],
-        beta=beta,
+        original_max_position_embeddings=int(original_max_position_embeddings),
+        beta=float(beta),
     )
 
 
-def hf_config_to_native_config(hf_config: MistralHFConfigType) -> MistralNativeConfig:
-    r"""Convert an HF config back to a ``MistralNativeConfig``.
-
-    This is the reverse of :func:`native_config_to_hf_config`. Dispatch is
-    based on the concrete HF config type.
-
-    Args:
-        hf_config: A HuggingFace config for one of the Mistral model families.
-
-    Returns:
-        The corresponding ``MistralNativeConfig``.
-
-    Raises:
-        ValueError: If the config type is not recognised.
-    """
-    # Order matters: Mistral3Config is a composition config and must be
-    # checked before MistralConfig (which it does *not* inherit from).
+def _hf_config_to_native_config(hf_config: MistralHFConfigType) -> MistralNativeConfig:
+    # Order matters
     match hf_config:
         case Mistral3Config():
             return _hf_mistral3_to_native(hf_config)
@@ -486,7 +467,8 @@ def hf_config_to_native_config(hf_config: MistralHFConfigType) -> MistralNativeC
 
 
 def _hf_mistral_to_native(hf_config: MistralConfig) -> MistralNativeConfig:
-    r"""Reverse of ``native_config_to_mistral``."""
+    assert hf_config.head_dim is not None
+
     return MistralNativeConfig(
         dim=hf_config.hidden_size,
         n_layers=hf_config.num_hidden_layers,
@@ -506,7 +488,6 @@ def _hf_mistral_to_native(hf_config: MistralConfig) -> MistralNativeConfig:
 
 
 def _hf_ministral3_to_native(hf_config: Ministral3Config) -> MistralNativeConfig:
-    r"""Reverse of ``native_config_to_ministral3``."""
     return MistralNativeConfig(
         dim=hf_config.hidden_size,
         n_layers=hf_config.num_hidden_layers,
@@ -529,8 +510,13 @@ def _hf_ministral3_to_native(hf_config: Ministral3Config) -> MistralNativeConfig
 
 
 def _hf_mistral4_to_native(hf_config: Mistral4Config) -> MistralNativeConfig:
-    r"""Reverse of ``native_config_to_mistral4``."""
     rope_params = getattr(hf_config, "rope_parameters", None)
+    assert hf_config.num_key_value_heads is not None
+    assert hf_config.num_experts_per_tok is not None
+    assert hf_config.first_k_dense_replace is not None
+    assert hf_config.n_group is not None
+    assert hf_config.topk_group is not None
+
     return MistralNativeConfig(
         dim=hf_config.hidden_size,
         n_layers=hf_config.num_hidden_layers,
@@ -560,26 +546,13 @@ def _hf_mistral4_to_native(hf_config: Mistral4Config) -> MistralNativeConfig:
             routed_scale=hf_config.routed_scaling_factor,
             num_expert_groups=hf_config.n_group,
             num_expert_groups_per_tok=hf_config.topk_group,
-            # Fields below have no HF counterpart; use sensible defaults.
-            expert_parallel=1,
-            expert_model_parallel=1,
-            route_every_n=1,
         ),
         quantization_config=_extract_hf_quantization_config(hf_config),
     )
 
 
 def _hf_mistral3_to_native(hf_config: Mistral3Config) -> MistralNativeConfig:
-    r"""Reverse of ``native_config_to_mistral3``.
-
-    Note:
-        ``VisionEncoderArgs`` fields ``image_break_token_id``,
-        ``image_end_token_id``, ``mm_projector_id``, ``max_image_size``, and
-        ``add_pre_mm_projector_layer_norm`` have no HF config counterpart.
-        They are hardcoded here but should ideally be recovered from the
-        tokenizer.
-    """
-    text_native = hf_config_to_native_config(hf_config.text_config)
+    text_native = _hf_config_to_native_config(hf_config.text_config)
     vision_hf: PixtralVisionConfig = hf_config.vision_config
 
     vision_encoder = VisionEncoderArgs(
@@ -608,17 +581,6 @@ def _hf_mistral3_to_native(hf_config: Mistral3Config) -> MistralNativeConfig:
 
 
 def _parse_native_config_from_dict(params: dict) -> MistralNativeConfig:
-    r"""Build a ``MistralNativeConfig`` from a raw ``params.json`` dict.
-
-    Nested sub-configs (``yarn``, ``moe``, ``quantization``, ``vision_encoder``,
-    ``llama_4_scaling``) are constructed from their corresponding sub-dicts.
-
-    Args:
-        params: Raw key/value pairs from a Mistral ``params.json`` file.
-
-    Returns:
-        The populated ``MistralNativeConfig``.
-    """
     yarn_dict = params.get("yarn")
     yarn = (
         YarnArgs(
@@ -635,15 +597,11 @@ def _parse_native_config_from_dict(params: dict) -> MistralNativeConfig:
     llama_4_scaling = (
         Llama4Scaling(
             original_max_position_embeddings=llama4_dict["original_max_position_embeddings"],
-            beta=llama4_dict.get("beta", 0.1),
+            beta=llama4_dict["beta"],
         )
         if llama4_dict is not None
         else None
     )
-    if llama_4_scaling is None and yarn is not None:
-        llama_4_scaling = Llama4Scaling(
-            original_max_position_embeddings=yarn.original_max_position_embeddings,
-        )
 
     quant_dict = params.get("quantization")
     quantization = (
@@ -658,11 +616,11 @@ def _parse_native_config_from_dict(params: dict) -> MistralNativeConfig:
             num_experts=moe_dict["num_experts"],
             num_experts_per_tok=moe_dict["num_experts_per_tok"],
             expert_hidden_dim=moe_dict["expert_hidden_dim"],
-            first_k_dense_replace=moe_dict.get("first_k_dense_replace", 0),
-            num_shared_experts=moe_dict.get("num_shared_experts", 1),
-            routed_scale=moe_dict.get("routed_scale", 1.0),
-            num_expert_groups=moe_dict.get("num_expert_groups", 1),
-            num_expert_groups_per_tok=moe_dict.get("num_expert_groups_per_tok", 1),
+            first_k_dense_replace=moe_dict["first_k_dense_replace"],
+            num_shared_experts=moe_dict["num_shared_experts"],
+            routed_scale=moe_dict["routed_scale"],
+            num_expert_groups=moe_dict["num_expert_groups"],
+            num_expert_groups_per_tok=moe_dict["num_expert_groups_per_tok"],
             expert_parallel=moe_dict.get("expert_parallel", 1),
             expert_model_parallel=moe_dict.get("expert_model_parallel", 1),
             route_every_n=moe_dict.get("route_every_n", 1),
@@ -680,16 +638,16 @@ def _parse_native_config_from_dict(params: dict) -> MistralNativeConfig:
             patch_size=vision_dict["patch_size"],
             image_size=vision_dict["image_size"],
             intermediate_size=vision_dict["intermediate_size"],
-            num_channels=vision_dict.get("num_channels", 3),
-            max_image_size=vision_dict.get("max_image_size", vision_dict["image_size"]),
-            rope_theta=vision_dict.get("rope_theta", 10000.0),
-            mm_projector_id=vision_dict.get("mm_projector_id", "patch_merge"),
-            add_pre_mm_projector_layer_norm=vision_dict.get("add_pre_mm_projector_layer_norm", True),
-            adapter_bias=vision_dict.get("adapter_bias", False),
-            spatial_merge_size=vision_dict.get("spatial_merge_size", 2),
-            image_token_id=vision_dict.get("image_token_id", 10),
-            image_break_token_id=vision_dict.get("image_break_token_id", 12),
-            image_end_token_id=vision_dict.get("image_end_token_id", 13),
+            num_channels=vision_dict["num_channels"],
+            max_image_size=vision_dict["max_image_size"],
+            rope_theta=vision_dict["rope_theta"],
+            mm_projector_id=vision_dict["mm_projector_id"],
+            add_pre_mm_projector_layer_norm=vision_dict["add_pre_mm_projector_layer_norm"],
+            adapter_bias=vision_dict["adapter_bias"],
+            spatial_merge_size=vision_dict["spatial_merge_size"],
+            image_token_id=vision_dict["image_token_id"],
+            image_break_token_id=vision_dict["image_break_token_id"],
+            image_end_token_id=vision_dict["image_end_token_id"],
         )
         if vision_dict is not None
         else None
@@ -701,11 +659,11 @@ def _parse_native_config_from_dict(params: dict) -> MistralNativeConfig:
         head_dim=params["head_dim"],
         hidden_dim=params["hidden_dim"],
         n_heads=params["n_heads"],
-        n_kv_heads=params.get("n_kv_heads", params["n_heads"]),
-        rope_theta=params.get("rope_theta", 10000.0),
+        n_kv_heads=params["n_kv_heads"],
+        rope_theta=params["rope_theta"],
         norm_eps=params["norm_eps"],
         vocab_size=params["vocab_size"],
-        max_position_embeddings=params.get("max_position_embeddings", 131072),
+        max_position_embeddings=params.get("max_position_embeddings"),
         sliding_window=params.get("sliding_window"),
         tied_embeddings=params.get("tied_embeddings", False),
         q_lora_rank=params.get("q_lora_rank"),
@@ -722,19 +680,19 @@ def _parse_native_config_from_dict(params: dict) -> MistralNativeConfig:
 
 
 def native_config_for_model_type(model_type: str, params: dict) -> MistralNativeConfig:
-    r"""Build a ``MistralNativeConfig`` from a raw ``params.json`` dict.
+    r"""Build a `MistralNativeConfig` from a raw `params.json` dict.
 
-    The ``model_type`` is validated against known Mistral model types but the
-    construction itself is model-type agnostic since ``MistralNativeConfig`` is
+    The `model_type` is validated against known Mistral model types but the
+    construction itself is model-type agnostic since `MistralNativeConfig` is
     a single generic dataclass.
 
     Args:
-        model_type: One of ``"mistral"``, ``"ministral3"``, ``"mistral4"``,
-            ``"mistral3"``.
-        params: Raw key/value pairs from a Mistral ``params.json`` file.
+        model_type: One of `"mistral"`, `"ministral3"`, `"mistral4"`,
+            `"mistral3"`.
+        params: Raw key/value pairs from a Mistral `params.json` file.
 
     Raises:
-        ValueError: If ``model_type`` is unknown.
+        ValueError: If `model_type` is unknown.
     """
     try:
         MistralModelType(model_type)
@@ -766,5 +724,5 @@ def native_config_from_hf_config(model_type: str, hf_config: MistralHFConfigType
     except ValueError:
         raise ValueError(
             f"Unknown Mistral model type {model_type!r}. Supported types: {[m.value for m in MistralModelType]}"
-        ) from None
-    return hf_config_to_native_config(hf_config)
+        )
+    return _hf_config_to_native_config(hf_config)

@@ -116,8 +116,8 @@ class PixtralProcessor(ProcessorMixin):
         r"""Instantiate a :class:`PixtralProcessor` from a pretrained checkpoint.
 
         In addition to the standard HuggingFace processor files, this method supports
-        native Mistral checkpoints that contain ``tekken.json`` and ``params.json`` instead
-        of ``processor_config.json`` / ``tokenizer.json``.
+        native Mistral checkpoints that contain `tekken.json` and `params.json` instead
+        of `processor_config.json` / `tokenizer.json`.
 
         Args:
             pretrained_model_name_or_path: Path, model id, or Hub identifier.
@@ -127,12 +127,12 @@ class PixtralProcessor(ProcessorMixin):
             token: Authentication token for the Hub.
             revision: Git revision to use.
             **kwargs: Additional keyword arguments forwarded to the standard loading
-                machinery. The extra keyword ``mistral_format`` (bool | None) controls
+                machinery. The extra keyword `mistral_format` (bool | None) controls
                 format detection:
 
-                - ``True``: force loading from ``tekken.json`` + ``params.json``.
-                - ``False``: force loading from standard HuggingFace files.
-                - ``None`` (default): auto-detect.
+                - `True`: force loading from `tekken.json` + `params.json`.
+                - `False`: force loading from standard HuggingFace files.
+                - `None` (default): auto-detect.
         """
 
         mistral_format = kwargs.pop("mistral_format", None)
@@ -184,7 +184,6 @@ class PixtralProcessor(ProcessorMixin):
             )
 
         # Use the standard get_processor_dict machinery to discover chat templates.
-        # It gracefully handles missing processor_config.json by returning an empty dict.
         processor_dict, _ = cls.get_processor_dict(
             pretrained_model_name_or_path,
             cache_dir=cache_dir,

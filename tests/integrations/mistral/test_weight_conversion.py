@@ -11,15 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-r"""Tests for Phase 2: weight key conversion (requires torch)."""
-
-import unittest
 
 from transformers.testing_utils import require_torch
+from transformers.utils import is_torch_available
 
-
-if True:  # guarded import block for test discovery
-    from transformers.utils import is_torch_available
 
 if is_torch_available():
     import torch
@@ -30,7 +25,7 @@ if is_torch_available():
         FP8AwareSplitAndUnstack,
         FP8ScaleFusionMerge,
         FP8ScaleFusionSplit,
-        fp8_scale_renamings,
+        _fp8_scale_renamings,
         mistral3_native_text_renamings,
         mistral3_native_vision_converters,
         mistral3_native_vision_renamings,
@@ -43,7 +38,6 @@ if is_torch_available():
 def _source_target_pairs(
     entries: list,
 ) -> list[tuple[str, str]]:
-    r"""Extract `(source, target)` tuples from renaming/converter entries."""
     pairs = []
     for entry in entries:
         for src in entry.source_patterns:
@@ -53,14 +47,13 @@ def _source_target_pairs(
 
 
 def _apply_renamings(key: str, renamings: list) -> str:
-    r"""Apply a list of `WeightRenaming` entries to a key."""
     for renaming in renamings:
         key, _ = renaming.rename_source_key(key)
     return key
 
 
 @require_torch
-class TestMistralBaseRenamings(unittest.TestCase):
+class TestMistralBaseRenamings:
     def test_renamings(self):
         renamings = mistral_base_native_renamings()
         native_keys = [
@@ -103,8 +96,6 @@ class TestMistralBaseRenamings(unittest.TestCase):
         original = torch.arange(q_dim * hidden, dtype=torch.float32).reshape(q_dim, hidden)
 
         q_conv, k_conv = converters
-        # Q converter uses default "num_attention_heads"
-        # PermuteForRope.convert uses target_patterns[0] as the output key
         q_result = q_conv.operations[0].convert(
             input_dict={"attention.wq": [original.clone()]},
             source_patterns=["attention.wq"],
@@ -115,7 +106,6 @@ class TestMistralBaseRenamings(unittest.TestCase):
         self.assertEqual(permuted.shape, original.shape)
         self.assertFalse(torch.equal(permuted, original))
 
-        # Apply the inverse permutation to verify roundtrip
         inv_result = q_conv.operations[0].reverse_op.convert(
             input_dict={"self_attn.q_proj": [permuted]},
             source_patterns=["self_attn.q_proj"],
@@ -136,11 +126,9 @@ class TestMistralBaseRenamings(unittest.TestCase):
 
 
 @require_torch
-class TestFP8ScaleRenamings(unittest.TestCase):
-    r"""Tests for `fp8_scale_renamings`."""
-
+class TestFP8ScaleRenamings:
     def test_renamings(self):
-        renamings = fp8_scale_renamings()
+        renamings = _fp8_scale_renamings()
         self.assertIsInstance(renamings, list)
         self.assertTrue(all(isinstance(r, WeightRenaming) for r in renamings))
         pairs = _source_target_pairs(renamings)
@@ -153,9 +141,7 @@ class TestFP8ScaleRenamings(unittest.TestCase):
 
 
 @require_torch
-class TestMistral3Renamings(unittest.TestCase):
-    r"""Tests for Mistral3 text and vision renamings/converters."""
-
+class TestMistral3Renamings:
     def test_text_renamings_prefixed(self):
         renamings = mistral3_native_text_renamings()
         result = _apply_renamings("output.weight", renamings)
@@ -187,11 +173,10 @@ class TestMistral3Renamings(unittest.TestCase):
         converters = mistral3_native_vision_converters()
         self.assertIsInstance(converters, list)
         self.assertTrue(all(isinstance(c, WeightConverter) for c in converters))
-        # Should have converters for vision Q and K with PermuteForRope
+
         self.assertEqual(len(converters), 2)
         for converter in converters:
             self.assertTrue(any(isinstance(op, PermuteForRope) for op in converter.operations))
-            # The PermuteForRope should use a dotted attribute for vision config
             for op in converter.operations:
                 if isinstance(op, PermuteForRope):
                     self.assertEqual(op.n_heads_attr, "vision_config.num_attention_heads")
@@ -199,27 +184,20 @@ class TestMistral3Renamings(unittest.TestCase):
     def test_hf_keys_pass_through(self):
         renamings = mistral3_native_text_renamings()
         hf_key = "language_model.model.layers.0.self_attn.q_proj.weight"
-        # HF keys should not match native source patterns, so they remain unchanged
         result = _apply_renamings(hf_key, renamings)
-        # After passing through all renamings, it should either stay the same or be predictably different
-        # The key point is it shouldn't crash
         self.assertIsInstance(result, str)
 
 
 @require_torch
-class TestMistral4Renamings(unittest.TestCase):
-    r"""Tests for Mistral4 renamings (structural + MLA keys)."""
-
+class TestMistral4Renamings:
     def test_renamings(self):
         renamings = mistral4_native_renamings()
         test_cases = [
-            # Structural keys (shared with base)
             ("output.weight", "lm_head.weight"),
             ("tok_embeddings.weight", "model.embed_tokens.weight"),
             ("norm.weight", "model.norm.weight"),
             ("layers.0.attention_norm.weight", "model.layers.0.input_layernorm.weight"),
             ("layers.0.ffn_norm.weight", "model.layers.0.post_attention_layernorm.weight"),
-            # MLA-specific keys
             ("layers.0.attention.wkv_a_with_mqa.weight", "model.layers.0.self_attn.kv_a_proj_with_mqa.weight"),
             ("layers.0.attention.wq_a.weight", "model.layers.0.self_attn.q_a_proj.weight"),
             ("layers.0.attention.wq_b.weight", "model.layers.0.self_attn.q_b_proj.weight"),
@@ -238,9 +216,7 @@ class TestMistral4Renamings(unittest.TestCase):
 
 
 @require_torch
-class TestFP8AwareMergeAndConcatenate(unittest.TestCase):
-    r"""Tests for `FP8AwareMergeAndConcatenate`."""
-
+class TestFP8AwareMergeAndConcatenate:
     def test_merge_bf16(self):
         op = FP8AwareMergeAndConcatenate()
         n_experts = 4
@@ -283,7 +259,6 @@ class TestFP8AwareMergeAndConcatenate(unittest.TestCase):
         op = FP8AwareMergeAndConcatenate()
         n_experts = 2
         gate_dim, up_dim, in_dim = 16, 16, 32
-        # Block-wise scales have multi-dimensional shapes
         w1 = [torch.randn(gate_dim, in_dim).to(torch.float8_e4m3fn) for _ in range(n_experts)]
         w3 = [torch.randn(up_dim, in_dim).to(torch.float8_e4m3fn) for _ in range(n_experts)]
         w1_scales = [torch.randn(gate_dim, 1) for _ in range(n_experts)]
@@ -328,7 +303,6 @@ class TestFP8AwareMergeAndConcatenate(unittest.TestCase):
         self.assertEqual(result["gate_up_proj"].shape, (1, 32, 32))
 
     def test_merge_bf16_glob_keys(self):
-        r"""Full glob-style keys (``experts.*.w1.weight``) are matched by suffix."""
         op = FP8AwareMergeAndConcatenate()
         n_experts = 4
         gate_dim, up_dim, in_dim = 16, 16, 32
@@ -343,7 +317,6 @@ class TestFP8AwareMergeAndConcatenate(unittest.TestCase):
         self.assertEqual(result["gate_up_proj"].shape, (n_experts, gate_dim + up_dim, in_dim))
 
     def test_merge_per_tensor_fp8_renamed_keys(self):
-        r"""Post-renamed scale keys (``weight_scale_inv``) are recognised."""
         op = FP8AwareMergeAndConcatenate()
         n_experts = 2
         gate_dim, up_dim, in_dim = 16, 16, 32
@@ -371,7 +344,6 @@ class TestFP8AwareMergeAndConcatenate(unittest.TestCase):
         self.assertEqual(result["gate_up_proj"].dtype, torch.float8_e4m3fn)
 
     def test_merge_with_activation_scales(self):
-        r"""Activation scales are fused via per-expert max of w1/w3."""
         op = FP8AwareMergeAndConcatenate()
         n_experts = 4
         gate_dim, up_dim, in_dim = 16, 16, 32
@@ -404,9 +376,7 @@ class TestFP8AwareMergeAndConcatenate(unittest.TestCase):
 
 
 @require_torch
-class TestFP8AwareSplitAndUnstack(unittest.TestCase):
-    r"""Tests for `FP8AwareSplitAndUnstack`."""
-
+class TestFP8AwareSplitAndUnstack:
     def test_roundtrip_bf16(self):
         merge_op = FP8AwareMergeAndConcatenate()
         split_op = FP8AwareSplitAndUnstack()
@@ -441,9 +411,6 @@ class TestFP8AwareSplitAndUnstack(unittest.TestCase):
         split_op = FP8AwareSplitAndUnstack()
         n_experts = 2
         gate_dim, up_dim, in_dim = 16, 16, 32
-        # Use the same scale for w1 and w3 so that the fused scale equals the
-        # originals (max(s, s) == s). This lets us assert exact
-        # equality and still exercise the full per-tensor FP8 merge/split path.
         scale = torch.tensor(0.5)
         w1 = [torch.randn(gate_dim, in_dim).to(torch.float8_e4m3fn) for _ in range(n_experts)]
         w3 = [torch.randn(up_dim, in_dim).to(torch.float8_e4m3fn) for _ in range(n_experts)]
@@ -474,14 +441,12 @@ class TestFP8AwareSplitAndUnstack(unittest.TestCase):
             torch.testing.assert_close(reversed_result["w3.weight"][i], w3[i])
 
     def test_roundtrip_activation_scales(self):
-        r"""Activation scales survive merge → split roundtrip."""
         merge_op = FP8AwareMergeAndConcatenate()
         split_op = FP8AwareSplitAndUnstack()
         n_experts = 4
         gate_dim, up_dim, in_dim = 16, 16, 32
         w1_orig = [torch.randn(gate_dim, in_dim) for _ in range(n_experts)]
         w3_orig = [torch.randn(up_dim, in_dim) for _ in range(n_experts)]
-        # Use identical w1/w3 activation scales so max == original
         act_scales = [torch.tensor(float(i + 1)) for i in range(n_experts)]
         fused = merge_op.convert(
             input_dict={
@@ -511,11 +476,8 @@ class TestFP8AwareSplitAndUnstack(unittest.TestCase):
 
 
 @require_torch
-class TestFP8ScaleFusionMerge(unittest.TestCase):
-    r"""Tests for `FP8ScaleFusionMerge` and `FP8ScaleFusionSplit`."""
-
+class TestFP8ScaleFusionMerge:
     def test_per_tensor_merge(self):
-        r"""Per-tensor scales are fused via max and unsqueezed to [n, 1, 1]."""
         op = FP8ScaleFusionMerge()
         n_experts = 4
         w1_scales = [torch.tensor(0.5) for _ in range(n_experts)]
@@ -532,7 +494,6 @@ class TestFP8ScaleFusionMerge(unittest.TestCase):
             self.assertAlmostEqual(fused[e, 0, 0].item(), 0.5)
 
     def test_blockwise_merge(self):
-        r"""Block-wise scales are concatenated along dim 0 then stacked."""
         op = FP8ScaleFusionMerge()
         n_experts = 2
         w1_scales = [torch.randn(4, 2) for _ in range(n_experts)]
@@ -546,11 +507,9 @@ class TestFP8ScaleFusionMerge(unittest.TestCase):
         self.assertEqual(fused.shape, (n_experts, 8, 2))
 
     def test_roundtrip_per_tensor(self):
-        r"""Per-tensor scale merge → split roundtrip preserves values."""
         merge_op = FP8ScaleFusionMerge()
         split_op = FP8ScaleFusionSplit()
         n_experts = 3
-        # Use identical w1/w3 scales so max == original
         scales = [torch.tensor(float(i + 1)) for i in range(n_experts)]
         fused = merge_op.convert(
             input_dict={
@@ -571,7 +530,6 @@ class TestFP8ScaleFusionMerge(unittest.TestCase):
             self.assertAlmostEqual(reversed_result["w1.weight_scale_inv"][i].item(), float(i + 1))
 
     def test_roundtrip_blockwise(self):
-        r"""Block-wise scale merge → split roundtrip preserves values."""
         merge_op = FP8ScaleFusionMerge()
         split_op = FP8ScaleFusionSplit()
         n_experts = 2
@@ -590,7 +548,3 @@ class TestFP8ScaleFusionMerge(unittest.TestCase):
         for i in range(n_experts):
             torch.testing.assert_close(reversed_result["w1.scale"][i], w1_scales[i])
             torch.testing.assert_close(reversed_result["w3.scale"][i], w3_scales[i])
-
-
-if __name__ == "__main__":
-    unittest.main()

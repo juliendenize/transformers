@@ -41,8 +41,7 @@ class MistralFormatConfig(PreTrainedConfig):
     r"""PreTrainedConfig subclass with automatic Mistral native format detection.
 
     Overrides `get_config_dict` to fall back to `params.json` when `config.json`
-    is absent. Subclasses (e.g., `MistralConfig`, `Mistral4Config`) inherit this
-    behavior transparently.
+    is absent.
     """
 
     @classmethod
@@ -64,7 +63,7 @@ class MistralFormatConfig(PreTrainedConfig):
         """
         mistral_format = kwargs.pop("mistral_format", None)
 
-        if not mistral_format:  # None or False
+        if not mistral_format:
             try:
                 config_dict, kwargs = super().get_config_dict(pretrained_model_name_or_path, **kwargs)
                 if not config_dict:
@@ -74,7 +73,7 @@ class MistralFormatConfig(PreTrainedConfig):
                     )
                 return config_dict, kwargs
             except OSError as e:
-                if mistral_format is not None:
+                if mistral_format is False:
                     raise e
 
         return cls._get_config_dict_from_params_json(pretrained_model_name_or_path, **kwargs)
@@ -105,15 +104,15 @@ class MistralFormatConfig(PreTrainedConfig):
         kwargs.pop("_from_auto", None)
 
         resolved_params_file = cached_file(
-            pretrained_model_name_or_path,
-            _PARAMS_JSON,
+            path_or_repo_id=pretrained_model_name_or_path,
+            filename=_PARAMS_JSON,
             cache_dir=cache_dir,
             force_download=force_download,
             proxies=proxies,
-            local_files_only=local_files_only,
             token=token,
             revision=revision,
             subfolder=subfolder,
+            local_files_only=local_files_only,
             _commit_hash=commit_hash,
             _raise_exceptions_for_missing_entries=False,
         )
