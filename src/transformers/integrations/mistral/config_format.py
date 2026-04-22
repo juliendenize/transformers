@@ -210,9 +210,13 @@ class MistralFormatConfig(PreTrainedConfig):
         r"""Convert this HF config back to a native `params.json` dict.
 
         Uses the reverse dispatcher to create a native config dataclass,
-        then serializes it via `dataclasses.asdict`.
+        then serializes it via `dataclasses.asdict`.  Strips HF-only
+        fields that should not appear in native ``params.json``.
         """
         from .params_conversion import native_config_from_hf_config  # lazy: avoid circular import
 
         native = native_config_from_hf_config(self.model_type, self)
-        return dataclasses.asdict(native)
+        result = dataclasses.asdict(native)
+        # Remove HF-only field that should not appear in native params.json
+        result.pop("quantization_config", None)
+        return result

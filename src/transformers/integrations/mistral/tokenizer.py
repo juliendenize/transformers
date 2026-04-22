@@ -1,7 +1,8 @@
 import base64
 import json
 from functools import lru_cache
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from tokenizers import AddedToken, Regex, Tokenizer, decoders, pre_tokenizers, processors
 from tokenizers.models import BPE
@@ -44,6 +45,12 @@ class MistralConverter:
         self.additional_special_tokens = additional_special_tokens
         self._precomputed_vocab: dict[str, int] | None = None
         self._precomputed_merges: list[tuple[str, str]] | None = None
+        self._tekken_metadata: dict[str, Any] | None = None
+
+    @property
+    def tekken_metadata(self) -> dict[str, Any]:
+        assert self._tekken_metadata is not None, "Only accessible when instance is created by `from_tekken_file` method."
+        return self._tekken_metadata
 
     @classmethod
     def from_tekken_file(
@@ -108,6 +115,9 @@ class MistralConverter:
         instance._precomputed_vocab = vocab
         instance._precomputed_merges = merges
 
+        # Preserve tekken.json metadata so it can be reconstructed on save.
+        instance._tekken_metadata = {k: v for k, v in untyped.items() if k != "vocab"}
+
         return instance
 
     def extract_vocab_merges_from_model(self, vocab: dict) -> tuple[dict[str, int], list[tuple[str, str]]]:
@@ -167,9 +177,103 @@ class MistralConverter:
 
 
 def convert_tekken_tokenizer(tokenizer_file: str) -> PreTrainedTokenizerFast:
-    slow = MistralConverter.from_tekken_file(vocab_file=tokenizer_file, add_prefix_space=False).converted()
-    fast = PreTrainedTokenizerFast(tokenizer_object=slow, **MAP_SPECIALS)
+    converter = MistralConverter.from_tekken_file(vocab_file=tokenizer_file, add_prefix_space=False)
+    fast = PreTrainedTokenizerFast(
+        tokenizer_object=converter.converted(),
+        tekken_metadata=converter.tekken_metadata,
+        **MAP_SPECIALS,
+    )
     return fast
+
+
+def _unicode_to_bytes() -> dict[str, int]:
+    r"""Invert `bytes_to_unicode()` to map unicode chars back to byte values."""
+    return {v: k for k, v in bytes_to_unicode().items()}
+
+
+def _bpe_token_to_bytes(token_str: str, decoder: dict[str, int]) -> bytes:
+    r"""Convert a BPE unicode token string back to raw bytes."""
+    return bytes(decoder[ch] for ch in token_str)
+
+
+def save_as_tekken(
+    tokenizer: PreTrainedTokenizerFast,
+    save_directory: str | Path,
+) -> Path:
+    r"""Reconstruct a `tekken.json` file from an HF tokenizer with stored tekken metadata.
+
+    The tokenizer must have been originally loaded from a `tekken.json` file and
+    must carry a `tekken_metadata` key in its `init_kwargs` (set automatically by
+    `convert_tekken_tokenizer`).
+
+    Args:
+        tokenizer: HF fast tokenizer with `tekken_metadata` in init_kwargs.
+        save_directory: Directory to write the `tekken.json` file to.
+
+    Returns:
+        Path to the written `tekken.json` file.
+
+    Raises:
+        ValueError: If the tokenizer does not carry tekken metadata.
+    """
+    metadata = getattr(tokenizer, "tekken_metadata", None) or tokenizer.init_kwargs.get("tekken_metadata")
+    if metadata is None:
+        raise ValueError(
+            "Tokenizer does not carry `tekken_metadata`. "
+            "It was not loaded from a tekken.json file or metadata was lost."
+        )
+
+    save_directory = Path(save_directory)
+    save_directory.mkdir(parents=True, exist_ok=True)
+
+    decoder = _unicode_to_bytes()
+
+    hf_vocab: dict[str, int] = tokenizer.get_vocab()
+
+    # Separate special tokens (low ids) from BPE tokens.
+    special_tokens_metadata = metadata.get("special_tokens", [])
+    special_token_strs = {st["token_str"] for st in special_tokens_metadata}
+
+    bpe_entries: list[tuple[int, str]] = []
+    for token_str, token_id in hf_vocab.items():
+        if token_str in special_token_strs:
+            continue
+        bpe_entries.append((token_id, token_str))
+
+    bpe_entries.sort(key=lambda x: x[0])
+
+    vocab_list: list[dict] = []
+    for rank, (_token_id, token_str) in enumerate(bpe_entries):
+        try:
+            raw_bytes = _bpe_token_to_bytes(token_str, decoder)
+        except KeyError:
+            raw_bytes = token_str.encode("utf-8")
+        vocab_list.append(
+            {
+                "rank": rank,
+                "token_bytes": base64.b64encode(raw_bytes).decode("ascii"),
+                "token_str": raw_bytes.decode("utf-8", errors="replace"),
+            }
+        )
+
+    tekken_data: dict = {}
+    tekken_data["vocab"] = vocab_list
+    tekken_data["special_tokens"] = special_tokens_metadata
+    if "config" in metadata:
+        tekken_data["config"] = metadata["config"]
+    if "version" in metadata:
+        tekken_data["version"] = metadata["version"]
+    if "type" in metadata:
+        tekken_data["type"] = metadata["type"]
+    for optional_key in ("image", "audio", "multimodal"):
+        if optional_key in metadata and metadata[optional_key] is not None:
+            tekken_data[optional_key] = metadata[optional_key]
+
+    output_path = save_directory / "tekken.json"
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(tekken_data, f, ensure_ascii=False)
+
+    return output_path
 
 
 def convert_tekken_processor(

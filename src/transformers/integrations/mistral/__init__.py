@@ -9,6 +9,7 @@ __all__ = [
     "MistralConverter",
     "convert_tekken_processor",
     "convert_tekken_tokenizer",
+    "save_as_tekken",
 ]
 
 _MODULE = "tokenizer"
@@ -17,6 +18,7 @@ _ATTR_TO_MODULE = {
     "MistralConverter": _MODULE,
     "convert_tekken_processor": _MODULE,
     "convert_tekken_tokenizer": _MODULE,
+    "save_as_tekken": _MODULE,
 }
 
 

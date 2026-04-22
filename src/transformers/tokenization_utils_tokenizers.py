@@ -203,7 +203,9 @@ class TokenizersBackend(PreTrainedTokenizerBase):
         if isinstance(vocab_file, str) and vocab_file.endswith("tekken.json") and os.path.isfile(vocab_file):
             from .integrations.mistral.tokenizer import MistralConverter
 
-            local_kwargs["tokenizer_object"] = MistralConverter.from_tekken_file(vocab_file).converted()
+            converter = MistralConverter.from_tekken_file(vocab_file)
+            local_kwargs["tokenizer_object"] = converter.converted()
+            local_kwargs["tekken_metadata"] = converter.tekken_metadata
             return local_kwargs
 
         # SentencePiece model (with TikToken fallback)

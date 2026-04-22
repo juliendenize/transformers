@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass
 from enum import Enum
+from typing import ClassVar
 
 from transformers.quantizers.auto import AutoQuantizationConfig
 
@@ -32,6 +33,7 @@ from ...utils.quantization_config import QuantizationConfigMixin
 
 
 _QUANTIZATION_SCHEME_MAP = {"TENSOR": "static"}
+_REVERSE_QUANTIZATION_SCHEME_MAP = {v: k for k, v in _QUANTIZATION_SCHEME_MAP.items()}
 
 
 class MistralModelType(str, Enum):
@@ -62,11 +64,14 @@ def _extract_yarn(config: PreTrainedConfig) -> YarnArgs | None:
     rope_type = rope_params.get("rope_type", rope_params.get("type"))
     if rope_type != "yarn":
         return None
+    rope_mscale_all_dim = rope_params.get("mscale_all_dim")
+    apply_scale = rope_mscale_all_dim is None or rope_mscale_all_dim != 1.0
     return YarnArgs(
         factor=rope_params["factor"],
         original_max_position_embeddings=rope_params["original_max_position_embeddings"],
         beta=int(rope_params["beta_fast"]),
         alpha=int(rope_params["beta_slow"]),
+        apply_scale=apply_scale,
     )
 
 
@@ -82,6 +87,7 @@ class YarnArgs:
     original_max_position_embeddings: int
     beta: int
     alpha: int
+    apply_scale: bool = False
 
 
 class QFormat(str, Enum):
@@ -93,7 +99,7 @@ class QuantizationArgs:
     qformat_weight: QFormat
     qscheme_act: str
 
-    _SUPPORTED_SCHEMES: frozenset[str] = frozenset({"TENSOR"})
+    _SUPPORTED_SCHEMES: ClassVar[frozenset[str]] = frozenset({"TENSOR"})
 
     def __post_init__(self) -> None:
         if self.qformat_weight not in list(QFormat):
@@ -256,6 +262,9 @@ def _get_rope_parameters(
         )
         rope_kwargs["llama_4_scaling_beta"] = llama4_scaling.beta
 
+    if not yarn_args.apply_scale:
+        rope_kwargs["mscale_all_dim"] = 1.0
+
     return RopeParameters(
         rope_type="yarn",
         rope_theta=rope_theta,
@@ -263,7 +272,6 @@ def _get_rope_parameters(
         original_max_position_embeddings=yarn_args.original_max_position_embeddings,
         beta_fast=float(yarn_args.beta),
         beta_slow=float(yarn_args.alpha),
-        mscale_all_dim=1.0,
         **rope_kwargs,
     )
 
@@ -303,7 +311,7 @@ def _native_config_to_mistral(native_config: MistralNativeConfig) -> MistralConf
 
 
 def _native_config_to_ministral3(native_config: MistralNativeConfig) -> Ministral3Config:
-    assert native_config.yarn is not None and native_config.llama_4_scaling is not None
+    assert native_config.yarn is not None
     quant_config = native_config.quantization_config or _get_maybe_quant_config(
         is_vision_model=False, quantization_args=native_config.quantization
     )
@@ -434,6 +442,18 @@ def _extract_hf_quantization_config(hf_config: PreTrainedConfig) -> Quantization
     return None
 
 
+def _hf_quant_config_to_native(hf_config: PreTrainedConfig) -> QuantizationArgs | None:
+    r"""Convert an HF quantization config back to native ``QuantizationArgs``."""
+    quant_cfg = _extract_hf_quantization_config(hf_config)
+    if quant_cfg is None:
+        return None
+    qc = quant_cfg.to_dict()
+    if qc.get("quant_method") != "fp8":
+        return None
+    scheme = _REVERSE_QUANTIZATION_SCHEME_MAP.get(qc.get("activation_scheme", "static"), "TENSOR")
+    return QuantizationArgs(qformat_weight=QFormat.FP8_E4M3, qscheme_act=scheme)
+
+
 def _extract_llama4_scaling_from_rope_params(rope_params: dict | RopeParameters | None) -> Llama4Scaling | None:
     if (
         not rope_params
@@ -483,7 +503,7 @@ def _hf_mistral_to_native(hf_config: MistralConfig) -> MistralNativeConfig:
         sliding_window=hf_config.sliding_window,
         tied_embeddings=hf_config.tie_word_embeddings,
         yarn=_extract_yarn(hf_config),
-        quantization_config=_extract_hf_quantization_config(hf_config),
+        quantization=_hf_quant_config_to_native(hf_config),
     )
 
 
@@ -505,7 +525,7 @@ def _hf_ministral3_to_native(hf_config: Ministral3Config) -> MistralNativeConfig
         llama_4_scaling=_extract_llama4_scaling_from_rope_params(
             getattr(hf_config, "rope_parameters", None),
         ),
-        quantization_config=_extract_hf_quantization_config(hf_config),
+        quantization=_hf_quant_config_to_native(hf_config),
     )
 
 
@@ -547,7 +567,7 @@ def _hf_mistral4_to_native(hf_config: Mistral4Config) -> MistralNativeConfig:
             num_expert_groups=hf_config.n_group,
             num_expert_groups_per_tok=hf_config.topk_group,
         ),
-        quantization_config=_extract_hf_quantization_config(hf_config),
+        quantization=_hf_quant_config_to_native(hf_config),
     )
 
 
@@ -576,7 +596,7 @@ def _hf_mistral3_to_native(hf_config: Mistral3Config) -> MistralNativeConfig:
     )
 
     text_native.vision_encoder = vision_encoder
-    text_native.quantization_config = _extract_hf_quantization_config(hf_config)
+    text_native.quantization = _hf_quant_config_to_native(hf_config)
     return text_native
 
 
@@ -588,6 +608,7 @@ def _parse_native_config_from_dict(params: dict) -> MistralNativeConfig:
             original_max_position_embeddings=yarn_dict["original_max_position_embeddings"],
             beta=yarn_dict["beta"],
             alpha=yarn_dict["alpha"],
+            apply_scale=yarn_dict.get("apply_scale", False),
         )
         if yarn_dict is not None
         else None

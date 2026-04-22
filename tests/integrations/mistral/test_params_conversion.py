@@ -49,7 +49,7 @@ def base_native_config() -> MistralNativeConfig:
 
 @pytest.fixture()
 def yarn_args() -> YarnArgs:
-    return YarnArgs(factor=16.0, original_max_position_embeddings=16384, beta=32.0, alpha=1.0)
+    return YarnArgs(factor=16.0, original_max_position_embeddings=16384, beta=32.0, alpha=1.0, apply_scale=False)
 
 
 @pytest.fixture()
@@ -147,7 +147,7 @@ def mistral4_native_config(moe_args: MOEModelArgs) -> MistralNativeConfig:
         qk_nope_head_dim=64,
         kv_lora_rank=256,
         v_head_dim=128,
-        yarn=YarnArgs(factor=128.0, original_max_position_embeddings=8192, beta=32.0, alpha=1.0),
+        yarn=YarnArgs(factor=128.0, original_max_position_embeddings=8192, beta=32.0, alpha=1.0, apply_scale=False),
         llama_4_scaling=Llama4Scaling(original_max_position_embeddings=8192, beta=0.1),
         moe=moe_args,
     )
@@ -510,9 +510,9 @@ class TestHFToNativeMistral:
             quantization_config=_make_hf_fp8_quant_config(),
         )
         native = _hf_config_to_native_config(hf)
-        assert native.quantization is None
-        assert native.quantization_config is not None
-        assert isinstance(native.quantization_config, QuantizationConfigMixin)
+        assert native.quantization is not None
+        assert native.quantization_config is None
+        assert native.quantization == QuantizationArgs("fp8_e4m3", "TENSOR")
         expected = MistralNativeConfig(
             dim=4096,
             n_layers=32,
@@ -524,7 +524,7 @@ class TestHFToNativeMistral:
             norm_eps=1e-5,
             vocab_size=32000,
             max_position_embeddings=32768,
-            quantization_config=native.quantization_config,
+            quantization=native.quantization,
         )
         assert native == expected
 
@@ -580,28 +580,10 @@ class TestHFToNativeMinistral3:
         )
         hf = _native_config_to_hf_config(native)
         restored = _hf_config_to_native_config(hf)
-        assert restored.quantization is None
-        assert restored.quantization_config is not None
-        qc_dict = restored.quantization_config.to_dict()
-        assert qc_dict["quant_method"] == "fp8"
-        assert qc_dict["activation_scheme"] == "static"
-        expected = MistralNativeConfig(
-            dim=4096,
-            n_layers=32,
-            head_dim=128,
-            hidden_dim=14336,
-            n_heads=32,
-            n_kv_heads=8,
-            rope_theta=1000000.0,
-            norm_eps=1e-5,
-            vocab_size=32000,
-            max_position_embeddings=262144,
-            tied_embeddings=True,
-            yarn=yarn_args,
-            llama_4_scaling=llama4_scaling,
-            quantization_config=restored.quantization_config,
-        )
-        assert restored == expected
+        assert restored.quantization is not None
+        assert restored.quantization_config is None
+        assert restored.quantization == QuantizationArgs("fp8_e4m3", "TENSOR")
+        assert restored == native
 
 
 class TestHFToNativeMistral4:

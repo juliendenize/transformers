@@ -46,6 +46,7 @@ MINISTRAL3_PARAMS = {
         "original_max_position_embeddings": 16384,
         "beta": 32.0,
         "alpha": 1.0,
+        "apply_scale": False,
     },
     "quantization": {
         "qformat_weight": "fp8_e4m3",

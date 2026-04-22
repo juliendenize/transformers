@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pytest
+
 from transformers.testing_utils import require_torch
 from transformers.utils import is_torch_available
 
@@ -82,7 +84,7 @@ class TestMistralBaseRenamings:
         ]
         for native_key, expected in zip(native_keys, expected_hf_keys):
             result = _apply_renamings(native_key, renamings)
-            self.assertEqual(result, expected, f"Renaming failed for {native_key!r}")
+            assert result == expected, f"Renaming failed for {native_key!r}"
 
     def test_rope_permutation_applied(self):
         converters = mistral_base_native_converters()
@@ -103,8 +105,8 @@ class TestMistralBaseRenamings:
             config=FakeConfig(),
         )
         permuted = q_result["self_attn.q_proj"][0]
-        self.assertEqual(permuted.shape, original.shape)
-        self.assertFalse(torch.equal(permuted, original))
+        assert permuted.shape == original.shape
+        assert not torch.equal(permuted, original)
 
         inv_result = q_conv.operations[0].reverse_op.convert(
             input_dict={"self_attn.q_proj": [permuted]},
@@ -122,22 +124,22 @@ class TestMistralBaseRenamings:
             config=FakeConfig(),
         )
         k_permuted = k_result["self_attn.k_proj"][0]
-        self.assertFalse(torch.equal(k_permuted, original))
+        assert not torch.equal(k_permuted, original)
 
 
 @require_torch
 class TestFP8ScaleRenamings:
     def test_renamings(self):
         renamings = _fp8_scale_renamings()
-        self.assertIsInstance(renamings, list)
-        self.assertTrue(all(isinstance(r, WeightRenaming) for r in renamings))
+        assert isinstance(renamings, list)
+        assert all(isinstance(r, WeightRenaming) for r in renamings)
         pairs = _source_target_pairs(renamings)
         sources = {src for src, _ in pairs}
         targets = {tgt for _, tgt in pairs}
-        self.assertTrue(any("qscale_weight" in s for s in sources))
-        self.assertTrue(any("qscale_act" in s for s in sources))
-        self.assertTrue(any("weight_scale_inv" in t for t in targets))
-        self.assertTrue(any("activation_scale" in t for t in targets))
+        assert any("qscale_weight" in s for s in sources)
+        assert any("qscale_act" in s for s in sources)
+        assert any("weight_scale_inv" in t for t in targets)
+        assert any("activation_scale" in t for t in targets)
 
 
 @require_torch
@@ -145,47 +147,47 @@ class TestMistral3Renamings:
     def test_text_renamings_prefixed(self):
         renamings = mistral3_native_text_renamings()
         result = _apply_renamings("output.weight", renamings)
-        self.assertEqual(result, "lm_head.weight")
+        assert result == "lm_head.weight"
         result = _apply_renamings("tok_embeddings.weight", renamings)
-        self.assertEqual(result, "language_model.embed_tokens.weight")
+        assert result == "model.language_model.embed_tokens.weight"
         result = _apply_renamings("layers.0.attention.wo.weight", renamings)
-        self.assertEqual(result, "language_model.layers.0.self_attn.o_proj.weight")
+        assert result == "model.language_model.layers.0.self_attn.o_proj.weight"
 
     def test_vision_renamings(self):
         renamings = mistral3_native_vision_renamings()
         test_cases = [
             (
                 "vision_encoder.transformer.layers.0.attention.wv.weight",
-                "vision_tower.transformer.layers.0.attention.v_proj.weight",
+                "model.vision_tower.transformer.layers.0.attention.v_proj.weight",
             ),
-            ("vision_encoder.ln_pre.weight", "vision_tower.ln_pre.weight"),
-            ("vision_encoder.patch_conv.weight", "vision_tower.patch_conv.weight"),
-            ("vision_language_adapter.w_in.weight", "multi_modal_projector.linear_1.weight"),
-            ("vision_language_adapter.w_out.weight", "multi_modal_projector.linear_2.weight"),
-            ("patch_merger.merging_layer.weight", "multi_modal_projector.patch_merger.merging_layer.weight"),
-            ("pre_mm_projector_norm.weight", "multi_modal_projector.norm.weight"),
+            ("vision_encoder.ln_pre.weight", "model.vision_tower.ln_pre.weight"),
+            ("vision_encoder.patch_conv.weight", "model.vision_tower.patch_conv.weight"),
+            ("vision_language_adapter.w_in.weight", "model.multi_modal_projector.linear_1.weight"),
+            ("vision_language_adapter.w_out.weight", "model.multi_modal_projector.linear_2.weight"),
+            ("patch_merger.merging_layer.weight", "model.multi_modal_projector.patch_merger.merging_layer.weight"),
+            ("pre_mm_projector_norm.weight", "model.multi_modal_projector.norm.weight"),
         ]
         for native_key, expected in test_cases:
             result = _apply_renamings(native_key, renamings)
-            self.assertEqual(result, expected, f"Vision renaming failed for {native_key!r}")
+            assert result == expected, f"Vision renaming failed for {native_key!r}"
 
     def test_vision_converters_dotted_heads(self):
         converters = mistral3_native_vision_converters()
-        self.assertIsInstance(converters, list)
-        self.assertTrue(all(isinstance(c, WeightConverter) for c in converters))
+        assert isinstance(converters, list)
+        assert all(isinstance(c, WeightConverter) for c in converters)
 
-        self.assertEqual(len(converters), 2)
+        assert len(converters) == 2
         for converter in converters:
-            self.assertTrue(any(isinstance(op, PermuteForRope) for op in converter.operations))
+            assert any(isinstance(op, PermuteForRope) for op in converter.operations)
             for op in converter.operations:
                 if isinstance(op, PermuteForRope):
-                    self.assertEqual(op.n_heads_attr, "vision_config.num_attention_heads")
+                    assert op.n_heads_attr == "vision_config.num_attention_heads"
 
     def test_hf_keys_pass_through(self):
         renamings = mistral3_native_text_renamings()
         hf_key = "language_model.model.layers.0.self_attn.q_proj.weight"
         result = _apply_renamings(hf_key, renamings)
-        self.assertIsInstance(result, str)
+        assert isinstance(result, str)
 
 
 @require_torch
@@ -212,7 +214,7 @@ class TestMistral4Renamings:
         ]
         for native_key, expected in test_cases:
             result = _apply_renamings(native_key, renamings)
-            self.assertEqual(result, expected, f"Renaming failed for {native_key!r}")
+            assert result == expected, f"Renaming failed for {native_key!r}"
 
 
 @require_torch
@@ -228,9 +230,9 @@ class TestFP8AwareMergeAndConcatenate:
             source_patterns=["w1.weight", "w3.weight"],
             target_patterns=["gate_up_proj"],
         )
-        self.assertIn("gate_up_proj", result)
+        assert "gate_up_proj" in result
         fused = result["gate_up_proj"]
-        self.assertEqual(fused.shape, (n_experts, gate_dim + up_dim, in_dim))
+        assert fused.shape == (n_experts, gate_dim + up_dim, in_dim)
 
     def test_merge_per_tensor_fp8(self):
         op = FP8AwareMergeAndConcatenate()
@@ -250,10 +252,10 @@ class TestFP8AwareMergeAndConcatenate:
             source_patterns=["w1.weight", "w3.weight", "w1.qscale_weight", "w3.qscale_weight"],
             target_patterns=["gate_up_proj", "gate_up_proj_scale_inv"],
         )
-        self.assertIn("gate_up_proj", result)
-        self.assertIn("gate_up_proj_scale_inv", result)
-        self.assertEqual(result["gate_up_proj"].shape, (n_experts, gate_dim + up_dim, in_dim))
-        self.assertEqual(result["gate_up_proj"].dtype, torch.float8_e4m3fn)
+        assert "gate_up_proj" in result
+        assert "gate_up_proj_scale_inv" in result
+        assert result["gate_up_proj"].shape == (n_experts, gate_dim + up_dim, in_dim)
+        assert result["gate_up_proj"].dtype == torch.float8_e4m3fn
 
     def test_merge_blockwise_fp8(self):
         op = FP8AwareMergeAndConcatenate()
@@ -273,17 +275,17 @@ class TestFP8AwareMergeAndConcatenate:
             source_patterns=["w1.weight", "w3.weight", "w1.qscale_weight", "w3.qscale_weight"],
             target_patterns=["gate_up_proj", "gate_up_proj_scale_inv"],
         )
-        self.assertIn("gate_up_proj", result)
-        self.assertIn("gate_up_proj_scale_inv", result)
+        assert "gate_up_proj" in result
+        assert "gate_up_proj_scale_inv" in result
         # Block-wise: scales are concatenated independently
-        self.assertEqual(result["gate_up_proj_scale_inv"].shape[0], n_experts)
-        self.assertEqual(result["gate_up_proj_scale_inv"].shape[1], gate_dim + up_dim)
+        assert result["gate_up_proj_scale_inv"].shape[0] == n_experts
+        assert result["gate_up_proj_scale_inv"].shape[1] == gate_dim + up_dim
 
     def test_mismatched_expert_count_raises(self):
         op = FP8AwareMergeAndConcatenate()
         w1 = [torch.randn(16, 32) for _ in range(4)]
         w3 = [torch.randn(16, 32) for _ in range(3)]  # mismatched!
-        with self.assertRaises((ValueError, RuntimeError)):
+        with pytest.raises((ValueError, RuntimeError)):
             op.convert(
                 input_dict={"w1.weight": w1, "w3.weight": w3},
                 source_patterns=["w1.weight", "w3.weight"],
@@ -299,8 +301,8 @@ class TestFP8AwareMergeAndConcatenate:
             source_patterns=["w1.weight", "w3.weight"],
             target_patterns=["gate_up_proj"],
         )
-        self.assertIn("gate_up_proj", result)
-        self.assertEqual(result["gate_up_proj"].shape, (1, 32, 32))
+        assert "gate_up_proj" in result
+        assert result["gate_up_proj"].shape == (1, 32, 32)
 
     def test_merge_bf16_glob_keys(self):
         op = FP8AwareMergeAndConcatenate()
@@ -313,8 +315,8 @@ class TestFP8AwareMergeAndConcatenate:
             source_patterns=["experts.*.w1.weight", "experts.*.w3.weight"],
             target_patterns=["gate_up_proj"],
         )
-        self.assertIn("gate_up_proj", result)
-        self.assertEqual(result["gate_up_proj"].shape, (n_experts, gate_dim + up_dim, in_dim))
+        assert "gate_up_proj" in result
+        assert result["gate_up_proj"].shape == (n_experts, gate_dim + up_dim, in_dim)
 
     def test_merge_per_tensor_fp8_renamed_keys(self):
         op = FP8AwareMergeAndConcatenate()
@@ -339,9 +341,9 @@ class TestFP8AwareMergeAndConcatenate:
             ],
             target_patterns=["gate_up_proj", "gate_up_proj_scale_inv"],
         )
-        self.assertIn("gate_up_proj", result)
-        self.assertIn("gate_up_proj_scale_inv", result)
-        self.assertEqual(result["gate_up_proj"].dtype, torch.float8_e4m3fn)
+        assert "gate_up_proj" in result
+        assert "gate_up_proj_scale_inv" in result
+        assert result["gate_up_proj"].dtype == torch.float8_e4m3fn
 
     def test_merge_with_activation_scales(self):
         op = FP8AwareMergeAndConcatenate()
@@ -366,13 +368,13 @@ class TestFP8AwareMergeAndConcatenate:
             ],
             target_patterns=["gate_up_proj", "gate_up_proj_activation_scale"],
         )
-        self.assertIn("gate_up_proj", result)
-        self.assertIn("gate_up_proj_activation_scale", result)
+        assert "gate_up_proj" in result
+        assert "gate_up_proj_activation_scale" in result
         act = result["gate_up_proj_activation_scale"]
-        self.assertEqual(act.shape, (n_experts,))
+        assert act.shape == (n_experts,)
         for e in range(n_experts):
             expected = max(float(e), float(e + 1))
-            self.assertAlmostEqual(act[e].item(), expected)
+            assert act[e].item() == pytest.approx(expected)
 
 
 @require_torch
@@ -395,13 +397,13 @@ class TestFP8AwareSplitAndUnstack:
             source_patterns=["gate_up_proj"],
             target_patterns=["w1.weight", "w3.weight"],
         )
-        self.assertIn("w1.weight", reversed_result)
-        self.assertIn("w3.weight", reversed_result)
+        assert "w1.weight" in reversed_result
+        assert "w3.weight" in reversed_result
         # Each should be a list of n_experts tensors
         w1_recovered = reversed_result["w1.weight"]
         w3_recovered = reversed_result["w3.weight"]
-        self.assertEqual(len(w1_recovered), n_experts)
-        self.assertEqual(len(w3_recovered), n_experts)
+        assert len(w1_recovered) == n_experts
+        assert len(w3_recovered) == n_experts
         for i in range(n_experts):
             torch.testing.assert_close(w1_recovered[i], w1_orig[i])
             torch.testing.assert_close(w3_recovered[i], w3_orig[i])
@@ -434,8 +436,8 @@ class TestFP8AwareSplitAndUnstack:
             source_patterns=["gate_up_proj", "gate_up_proj_scale_inv"],
             target_patterns=["w1.weight", "w3.weight", "w1.qscale_weight", "w3.qscale_weight"],
         )
-        self.assertIn("w1.weight", reversed_result)
-        self.assertIn("w3.weight", reversed_result)
+        assert "w1.weight" in reversed_result
+        assert "w3.weight" in reversed_result
         for i in range(n_experts):
             torch.testing.assert_close(reversed_result["w1.weight"][i], w1[i])
             torch.testing.assert_close(reversed_result["w3.weight"][i], w3[i])
@@ -458,7 +460,7 @@ class TestFP8AwareSplitAndUnstack:
             source_patterns=["w1.weight", "w3.weight", "w1.qscale_act", "w3.qscale_act"],
             target_patterns=["gate_up_proj", "gate_up_proj_activation_scale"],
         )
-        self.assertIn("gate_up_proj_activation_scale", fused)
+        assert "gate_up_proj_activation_scale" in fused
 
         reversed_result = split_op.convert(
             input_dict={
@@ -468,11 +470,11 @@ class TestFP8AwareSplitAndUnstack:
             source_patterns=["gate_up_proj", "gate_up_proj_activation_scale"],
             target_patterns=["w1.weight", "w3.weight", "w1.qscale_act", "w3.qscale_act"],
         )
-        self.assertIn("w1.qscale_act", reversed_result)
-        self.assertIn("w3.qscale_act", reversed_result)
+        assert "w1.qscale_act" in reversed_result
+        assert "w3.qscale_act" in reversed_result
         for i in range(n_experts):
-            self.assertAlmostEqual(reversed_result["w1.qscale_act"][i].item(), float(i + 1))
-            self.assertAlmostEqual(reversed_result["w3.qscale_act"][i].item(), float(i + 1))
+            assert reversed_result["w1.qscale_act"][i].item() == pytest.approx(float(i + 1))
+            assert reversed_result["w3.qscale_act"][i].item() == pytest.approx(float(i + 1))
 
 
 @require_torch
@@ -487,11 +489,11 @@ class TestFP8ScaleFusionMerge:
             source_patterns=["w1.weight_scale_inv", "w3.weight_scale_inv"],
             target_patterns=["gate_up_proj_scale_inv"],
         )
-        self.assertIn("gate_up_proj_scale_inv", result)
+        assert "gate_up_proj_scale_inv" in result
         fused = result["gate_up_proj_scale_inv"]
-        self.assertEqual(fused.shape, (n_experts, 1, 1))
+        assert fused.shape == (n_experts, 1, 1)
         for e in range(n_experts):
-            self.assertAlmostEqual(fused[e, 0, 0].item(), 0.5)
+            assert fused[e, 0, 0].item() == pytest.approx(0.5)
 
     def test_blockwise_merge(self):
         op = FP8ScaleFusionMerge()
@@ -504,7 +506,7 @@ class TestFP8ScaleFusionMerge:
             target_patterns=["gate_up_proj_scale_inv"],
         )
         fused = result["gate_up_proj_scale_inv"]
-        self.assertEqual(fused.shape, (n_experts, 8, 2))
+        assert fused.shape == (n_experts, 8, 2)
 
     def test_roundtrip_per_tensor(self):
         merge_op = FP8ScaleFusionMerge()
@@ -524,10 +526,10 @@ class TestFP8ScaleFusionMerge:
             source_patterns=["gate_up_proj_scale_inv"],
             target_patterns=["w1.weight_scale_inv", "w3.weight_scale_inv"],
         )
-        self.assertIn("w1.weight_scale_inv", reversed_result)
-        self.assertIn("w3.weight_scale_inv", reversed_result)
+        assert "w1.weight_scale_inv" in reversed_result
+        assert "w3.weight_scale_inv" in reversed_result
         for i in range(n_experts):
-            self.assertAlmostEqual(reversed_result["w1.weight_scale_inv"][i].item(), float(i + 1))
+            assert reversed_result["w1.weight_scale_inv"][i].item() == pytest.approx(float(i + 1))
 
     def test_roundtrip_blockwise(self):
         merge_op = FP8ScaleFusionMerge()

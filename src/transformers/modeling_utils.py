@@ -3439,6 +3439,10 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
         # save_format="hf" forces HF key names (skip revert), save_format="mistral" forces native keys
         if save_format == "hf":
             pass  # Keep HF key names, no revert
+        elif save_format == "mistral":
+            from .integrations.mistral.weight_conversion import convert_state_dict_to_native
+
+            state_dict = convert_state_dict_to_native(model_to_save, state_dict)
         elif save_original_format and not _hf_peft_config_loaded:
             state_dict = revert_weight_conversion(model_to_save, state_dict)
 
