@@ -1522,6 +1522,95 @@ def _assert_hf_dir(directory: Path, weight_patterns: set[str] | None = None) -> 
     )
 
 
+def _load_all_safetensors(directory: Path) -> dict:
+    r"""Load all ``consolidated*.safetensors`` shards from a directory into a single state dict."""
+    from safetensors.torch import load_file
+
+    sd: dict = {}
+    for sf_path in sorted(directory.glob("consolidated*.safetensors")):
+        if sf_path.suffix == ".json":
+            continue
+        sd.update(load_file(str(sf_path)))
+    return sd
+
+
+def _assert_native_roundtrip(
+    model_cls: type,
+    model_id: str,
+    tmp_path: Path,
+    *,
+    unexpected_key_patterns: set[str] = _EXPECTED_UNEXPECTED_KEY_PATTERNS,
+) -> None:
+    r"""Shared helper: download native → HF → save as native → compare files."""
+    mistral_dir = tmp_path / "mistral"
+    hf_dir = tmp_path / "hf"
+    native_dir = tmp_path / "native"
+
+    _download_mistral_files(model_id, mistral_dir)
+
+    original_native_sd = _load_all_safetensors(mistral_dir)
+    with open(mistral_dir / "params.json", encoding="utf-8") as f:
+        original_params = json.load(f)
+    with open(mistral_dir / "tekken.json", encoding="utf-8") as f:
+        original_tekken = json.load(f)
+
+    # native → HF
+    model = model_cls.from_pretrained(
+        str(mistral_dir), mistral_format=True, device_map=torch_device, torch_dtype=torch.bfloat16
+    )
+    model.save_pretrained(str(hf_dir), save_format="hf")
+    original_tok = AutoTokenizer.from_pretrained(str(mistral_dir))
+    original_tok.save_pretrained(str(hf_dir))
+    del model
+    backend_empty_cache(torch_device)
+    gc.collect()
+
+    # HF → save as native
+    model2 = model_cls.from_pretrained(str(hf_dir), device_map=torch_device, torch_dtype=torch.bfloat16)
+    reloaded_tok = AutoTokenizer.from_pretrained(str(hf_dir))
+    model2.save_pretrained(str(native_dir), save_format="mistral")
+    reloaded_tok.save_pretrained(str(native_dir), save_format="mistral")
+    del model2
+    backend_empty_cache(torch_device)
+    gc.collect()
+
+    # --- Assertions ---
+    _assert_mistral_dir(native_dir)
+
+    recovered_sd = _load_all_safetensors(native_dir)
+    expected_keys = {k for k in original_native_sd if not any(re.search(p, k) for p in unexpected_key_patterns)}
+    assert set(recovered_sd.keys()) == expected_keys, (
+        f"Key mismatch.\n  Missing: {expected_keys - set(recovered_sd)}\n  Extra: {set(recovered_sd) - expected_keys}"
+    )
+    for key in expected_keys:
+        assert torch.equal(original_native_sd[key], recovered_sd[key]), f"Tensor mismatch for {key}"
+
+    with open(native_dir / "params.json", encoding="utf-8") as f:
+        recovered_params = json.load(f)
+    for key, value in original_params.items():
+        if key not in recovered_params:
+            assert key in _NON_ROUNDTRIPPABLE_PARAMS_KEYS, f"params.json unexpectedly missing key {key!r}"
+            continue
+        recovered_value = recovered_params[key]
+        if isinstance(value, dict):
+            if recovered_value is None:
+                assert key in _NON_ROUNDTRIPPABLE_PARAMS_KEYS, (
+                    f"params.json key {key!r} is null but original is a dict"
+                )
+                continue
+            for sub_key, sub_value in value.items():
+                assert recovered_value[sub_key] == sub_value, f"params.json mismatch on {key!r}.{sub_key!r}"
+        else:
+            assert recovered_value == value, f"params.json mismatch on {key!r}"
+
+    with open(native_dir / "tekken.json", encoding="utf-8") as f:
+        recovered_tekken = json.load(f)
+    assert recovered_tekken["config"]["version"] == original_tekken["config"]["version"]
+    assert recovered_tekken.get("type") == original_tekken.get("type")
+    assert len(recovered_tekken["vocab"]) == len(original_tekken["vocab"])
+    assert len(recovered_tekken["special_tokens"]) == len(original_tekken["special_tokens"])
+
+
 @slow
 @require_torch_accelerator
 class TestMistralRealModelIntegration:
@@ -1588,76 +1677,7 @@ class TestMistralRealModelIntegration:
         gc.collect()
 
     def test_save_recovers_native_format(self, tmp_path: Path):
-        from safetensors.torch import load_file
-
-        mistral_dir = tmp_path / "mistral"
-        hf_dir = tmp_path / "hf"
-        native_dir = tmp_path / "native"
-
-        _download_mistral_files(self.model_id, mistral_dir)
-
-        original_native_sd = load_file(str(next(mistral_dir.glob("consolidated*.safetensors"))))
-        with open(mistral_dir / "params.json", encoding="utf-8") as f:
-            original_params = json.load(f)
-        with open(mistral_dir / "tekken.json", encoding="utf-8") as f:
-            original_tekken = json.load(f)
-
-        model = MistralForCausalLM.from_pretrained(
-            str(mistral_dir), mistral_format=True, device_map=torch_device, torch_dtype=torch.bfloat16
-        )
-        model.save_pretrained(str(hf_dir), save_format="hf")
-        original_tok = AutoTokenizer.from_pretrained(str(mistral_dir))
-        original_tok.save_pretrained(str(hf_dir))
-        del model
-        backend_empty_cache(torch_device)
-        gc.collect()
-
-        model2 = MistralForCausalLM.from_pretrained(str(hf_dir), device_map=torch_device, torch_dtype=torch.bfloat16)
-        reloaded_tok = AutoTokenizer.from_pretrained(str(hf_dir))
-        model2.save_pretrained(str(native_dir), save_format="mistral")
-        reloaded_tok.save_pretrained(str(native_dir), save_format="mistral")
-        del model2
-        backend_empty_cache(torch_device)
-        gc.collect()
-
-        _assert_mistral_dir(native_dir)
-
-        recovered_sd = load_file(str(next(native_dir.glob("consolidated*.safetensors"))))
-        # Filter original native keys to only those loaded by HF (exclude vision/QAT artifacts).
-        expected_keys = {
-            k for k in original_native_sd if not any(re.search(p, k) for p in _EXPECTED_UNEXPECTED_KEY_PATTERNS)
-        }
-        assert set(recovered_sd.keys()) == expected_keys, (
-            f"Key mismatch.\n  Missing: {expected_keys - set(recovered_sd)}"
-            f"\n  Extra: {set(recovered_sd) - expected_keys}"
-        )
-        for key in expected_keys:
-            assert torch.equal(original_native_sd[key], recovered_sd[key]), f"Tensor mismatch for {key}"
-
-        with open(native_dir / "params.json", encoding="utf-8") as f:
-            recovered_params = json.load(f)
-        for key, value in original_params.items():
-            if key not in recovered_params:
-                assert key in _NON_ROUNDTRIPPABLE_PARAMS_KEYS, f"params.json unexpectedly missing key {key!r}"
-                continue
-            recovered_value = recovered_params[key]
-            if isinstance(value, dict):
-                if recovered_value is None:
-                    assert key in _NON_ROUNDTRIPPABLE_PARAMS_KEYS, (
-                        f"params.json key {key!r} is null but original is a dict"
-                    )
-                    continue
-                for sub_key, sub_value in value.items():
-                    assert recovered_value[sub_key] == sub_value, f"params.json mismatch on {key!r}.{sub_key!r}"
-            else:
-                assert recovered_value == value, f"params.json mismatch on {key!r}"
-
-        with open(native_dir / "tekken.json", encoding="utf-8") as f:
-            recovered_tekken = json.load(f)
-        assert recovered_tekken["config"]["version"] == original_tekken["config"]["version"]
-        assert recovered_tekken.get("type") == original_tekken.get("type")
-        assert len(recovered_tekken["vocab"]) == len(original_tekken["vocab"])
-        assert len(recovered_tekken["special_tokens"]) == len(original_tekken["special_tokens"])
+        _assert_native_roundtrip(MistralForCausalLM, self.model_id, tmp_path)
 
 
 @slow
@@ -1726,77 +1746,7 @@ class TestMinistral3RealModelIntegration:
         gc.collect()
 
     def test_save_recovers_native_format(self, tmp_path: Path):
-        from safetensors.torch import load_file
-
-        mistral_dir = tmp_path / "mistral"
-        hf_dir = tmp_path / "hf"
-        native_dir = tmp_path / "native"
-
-        _download_mistral_files(self.model_id, mistral_dir)
-
-        original_native_sd = load_file(str(next(mistral_dir.glob("consolidated*.safetensors"))))
-        with open(mistral_dir / "params.json", encoding="utf-8") as f:
-            original_params = json.load(f)
-        with open(mistral_dir / "tekken.json", encoding="utf-8") as f:
-            original_tekken = json.load(f)
-
-        model = Ministral3ForCausalLM.from_pretrained(
-            str(mistral_dir), mistral_format=True, device_map=torch_device, torch_dtype=torch.bfloat16
-        )
-        model.save_pretrained(str(hf_dir), save_format="hf")
-        original_tok = AutoTokenizer.from_pretrained(str(mistral_dir))
-        original_tok.save_pretrained(str(hf_dir))
-        del model
-        backend_empty_cache(torch_device)
-        gc.collect()
-
-        model2 = Ministral3ForCausalLM.from_pretrained(
-            str(hf_dir), device_map=torch_device, torch_dtype=torch.bfloat16
-        )
-        reloaded_tok = AutoTokenizer.from_pretrained(str(hf_dir))
-        model2.save_pretrained(str(native_dir), save_format="mistral")
-        reloaded_tok.save_pretrained(str(native_dir), save_format="mistral")
-        del model2
-        backend_empty_cache(torch_device)
-        gc.collect()
-
-        _assert_mistral_dir(native_dir)
-
-        recovered_sd = load_file(str(next(native_dir.glob("consolidated*.safetensors"))))
-        expected_keys = {
-            k for k in original_native_sd if not any(re.search(p, k) for p in _EXPECTED_UNEXPECTED_KEY_PATTERNS)
-        }
-        assert set(recovered_sd.keys()) == expected_keys, (
-            f"Key mismatch.\n  Missing: {expected_keys - set(recovered_sd)}"
-            f"\n  Extra: {set(recovered_sd) - expected_keys}"
-        )
-        for key in expected_keys:
-            assert torch.equal(original_native_sd[key], recovered_sd[key]), f"Tensor mismatch for {key}"
-
-        with open(native_dir / "params.json", encoding="utf-8") as f:
-            recovered_params = json.load(f)
-        for key, value in original_params.items():
-            if key not in recovered_params:
-                assert key in _NON_ROUNDTRIPPABLE_PARAMS_KEYS, f"params.json unexpectedly missing key {key!r}"
-                continue
-            recovered_value = recovered_params[key]
-            if isinstance(value, dict):
-                if recovered_value is None:
-                    assert key in _NON_ROUNDTRIPPABLE_PARAMS_KEYS, (
-                        f"params.json key {key!r} is null but original is a dict"
-                    )
-                    continue
-                for sub_key, sub_value in value.items():
-                    assert recovered_value[sub_key] == sub_value, f"params.json mismatch on {key!r}.{sub_key!r}"
-            else:
-                assert recovered_value == value, f"params.json mismatch on {key!r}"
-
-        with open(native_dir / "tekken.json", encoding="utf-8") as f:
-            recovered_tekken = json.load(f)
-        assert recovered_tekken["config"]["version"] == original_tekken["config"]["version"]
-        assert recovered_tekken.get("type") == original_tekken.get("type")
-        assert len(recovered_tekken["vocab"]) == len(original_tekken["vocab"])
-        assert len(recovered_tekken["special_tokens"]) == len(original_tekken["special_tokens"])
+        _assert_native_roundtrip(Ministral3ForCausalLM, self.model_id, tmp_path)
 
 
 @slow
@@ -1865,77 +1815,13 @@ class TestMistral3RealModelIntegration:
         gc.collect()
 
     def test_save_recovers_native_format(self, tmp_path: Path):
-        from safetensors.torch import load_file
-
-        mistral_dir = tmp_path / "mistral"
-        hf_dir = tmp_path / "hf"
-        native_dir = tmp_path / "native"
-
-        _download_mistral_files(self.model_id, mistral_dir)
-
-        original_native_sd = load_file(str(next(mistral_dir.glob("consolidated*.safetensors"))))
-        with open(mistral_dir / "params.json", encoding="utf-8") as f:
-            original_params = json.load(f)
-        with open(mistral_dir / "tekken.json", encoding="utf-8") as f:
-            original_tekken = json.load(f)
-
-        model = Mistral3ForConditionalGeneration.from_pretrained(
-            str(mistral_dir), mistral_format=True, device_map=torch_device, torch_dtype=torch.bfloat16
+        # Mistral3 is a VLM — vision keys round-trip; only filter QAT artifacts.
+        _assert_native_roundtrip(
+            Mistral3ForConditionalGeneration,
+            self.model_id,
+            tmp_path,
+            unexpected_key_patterns={r"fake_quantizer"},
         )
-        model.save_pretrained(str(hf_dir), save_format="hf")
-        original_tok = AutoTokenizer.from_pretrained(str(mistral_dir))
-        original_tok.save_pretrained(str(hf_dir))
-        del model
-        backend_empty_cache(torch_device)
-        gc.collect()
-
-        model2 = Mistral3ForConditionalGeneration.from_pretrained(
-            str(hf_dir), device_map=torch_device, torch_dtype=torch.bfloat16
-        )
-        reloaded_tok = AutoTokenizer.from_pretrained(str(hf_dir))
-        model2.save_pretrained(str(native_dir), save_format="mistral")
-        reloaded_tok.save_pretrained(str(native_dir), save_format="mistral")
-        del model2
-        backend_empty_cache(torch_device)
-        gc.collect()
-
-        _assert_mistral_dir(native_dir)
-
-        recovered_sd = load_file(str(next(native_dir.glob("consolidated*.safetensors"))))
-        # Mistral3 is a VLM — vision keys are part of the model and should round-trip.
-        # Only filter QAT artifacts, not vision keys.
-        expected_keys = {k for k in original_native_sd if not re.search(r"fake_quantizer", k)}
-        assert set(recovered_sd.keys()) == expected_keys, (
-            f"Key mismatch.\n  Missing: {expected_keys - set(recovered_sd)}"
-            f"\n  Extra: {set(recovered_sd) - expected_keys}"
-        )
-        for key in expected_keys:
-            assert torch.equal(original_native_sd[key], recovered_sd[key]), f"Tensor mismatch for {key}"
-
-        with open(native_dir / "params.json", encoding="utf-8") as f:
-            recovered_params = json.load(f)
-        for key, value in original_params.items():
-            if key not in recovered_params:
-                assert key in _NON_ROUNDTRIPPABLE_PARAMS_KEYS, f"params.json unexpectedly missing key {key!r}"
-                continue
-            recovered_value = recovered_params[key]
-            if isinstance(value, dict):
-                if recovered_value is None:
-                    assert key in _NON_ROUNDTRIPPABLE_PARAMS_KEYS, (
-                        f"params.json key {key!r} is null but original is a dict"
-                    )
-                    continue
-                for sub_key, sub_value in value.items():
-                    assert recovered_value[sub_key] == sub_value, f"params.json mismatch on {key!r}.{sub_key!r}"
-            else:
-                assert recovered_value == value, f"params.json mismatch on {key!r}"
-
-        with open(native_dir / "tekken.json", encoding="utf-8") as f:
-            recovered_tekken = json.load(f)
-        assert recovered_tekken["config"]["version"] == original_tekken["config"]["version"]
-        assert recovered_tekken.get("type") == original_tekken.get("type")
-        assert len(recovered_tekken["vocab"]) == len(original_tekken["vocab"])
-        assert len(recovered_tekken["special_tokens"]) == len(original_tekken["special_tokens"])
 
 
 @slow
@@ -2004,81 +1890,4 @@ class TestMistral4RealModelIntegration:
         gc.collect()
 
     def test_save_recovers_native_format(self, tmp_path: Path):
-        from safetensors.torch import load_file
-
-        mistral_dir = tmp_path / "mistral"
-        hf_dir = tmp_path / "hf"
-        native_dir = tmp_path / "native"
-
-        _download_mistral_files(self.model_id, mistral_dir)
-
-        # Mistral4 may have multiple shards — load all of them.
-        original_native_sd = {}
-        for sf_path in sorted(mistral_dir.glob("consolidated*.safetensors")):
-            if sf_path.suffix == ".json":
-                continue
-            original_native_sd.update(load_file(str(sf_path)))
-        with open(mistral_dir / "params.json", encoding="utf-8") as f:
-            original_params = json.load(f)
-        with open(mistral_dir / "tekken.json", encoding="utf-8") as f:
-            original_tekken = json.load(f)
-
-        model = Mistral4ForCausalLM.from_pretrained(
-            str(mistral_dir), mistral_format=True, device_map=torch_device, torch_dtype=torch.bfloat16
-        )
-        model.save_pretrained(str(hf_dir), save_format="hf")
-        original_tok = AutoTokenizer.from_pretrained(str(mistral_dir))
-        original_tok.save_pretrained(str(hf_dir))
-        del model
-        backend_empty_cache(torch_device)
-        gc.collect()
-
-        model2 = Mistral4ForCausalLM.from_pretrained(str(hf_dir), device_map=torch_device, torch_dtype=torch.bfloat16)
-        reloaded_tok = AutoTokenizer.from_pretrained(str(hf_dir))
-        model2.save_pretrained(str(native_dir), save_format="mistral")
-        reloaded_tok.save_pretrained(str(native_dir), save_format="mistral")
-        del model2
-        backend_empty_cache(torch_device)
-        gc.collect()
-
-        _assert_mistral_dir(native_dir)
-
-        recovered_sd = {}
-        for sf_path in sorted(native_dir.glob("consolidated*.safetensors")):
-            if sf_path.suffix == ".json":
-                continue
-            recovered_sd.update(load_file(str(sf_path)))
-        expected_keys = {
-            k for k in original_native_sd if not any(re.search(p, k) for p in _EXPECTED_UNEXPECTED_KEY_PATTERNS)
-        }
-        assert set(recovered_sd.keys()) == expected_keys, (
-            f"Key mismatch.\n  Missing: {expected_keys - set(recovered_sd)}"
-            f"\n  Extra: {set(recovered_sd) - expected_keys}"
-        )
-        for key in expected_keys:
-            assert torch.equal(original_native_sd[key], recovered_sd[key]), f"Tensor mismatch for {key}"
-
-        with open(native_dir / "params.json", encoding="utf-8") as f:
-            recovered_params = json.load(f)
-        for key, value in original_params.items():
-            if key not in recovered_params:
-                assert key in _NON_ROUNDTRIPPABLE_PARAMS_KEYS, f"params.json unexpectedly missing key {key!r}"
-                continue
-            recovered_value = recovered_params[key]
-            if isinstance(value, dict):
-                if recovered_value is None:
-                    assert key in _NON_ROUNDTRIPPABLE_PARAMS_KEYS, (
-                        f"params.json key {key!r} is null but original is a dict"
-                    )
-                    continue
-                for sub_key, sub_value in value.items():
-                    assert recovered_value[sub_key] == sub_value, f"params.json mismatch on {key!r}.{sub_key!r}"
-            else:
-                assert recovered_value == value, f"params.json mismatch on {key!r}"
-
-        with open(native_dir / "tekken.json", encoding="utf-8") as f:
-            recovered_tekken = json.load(f)
-        assert recovered_tekken["config"]["version"] == original_tekken["config"]["version"]
-        assert recovered_tekken.get("type") == original_tekken.get("type")
-        assert len(recovered_tekken["vocab"]) == len(original_tekken["vocab"])
-        assert len(recovered_tekken["special_tokens"]) == len(original_tekken["special_tokens"])
+        _assert_native_roundtrip(Mistral4ForCausalLM, self.model_id, tmp_path)

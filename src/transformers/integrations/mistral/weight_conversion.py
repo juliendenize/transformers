@@ -116,53 +116,6 @@ class MistralWeightRenaming(WeightRenaming):
         return MistralWeightRenaming(source_patterns=new_src, target_patterns=new_tgt)
 
 
-class MistralWeightConverter(WeightConverter):
-    r"""``WeightConverter`` with correct ``reverse_transform`` for Mistral patterns.
-
-    For **single-source** converters the reversed source is built with
-    ``re.escape`` and the capturing group is stripped so that the result is a
-    suffix-only pattern.  This avoids the ordering issue in
-    ``revert_weight_conversion`` (renamings fire before converters) where
-    prefix renamings would otherwise prevent the converter from matching.
-
-    For **multi-source** converters (MoE expert merging) the single target
-    is ``re.escape``-d into the reversed source and the multiple sources
-    become the reversed targets (with ``\.`` unescaped).
-    """
-
-    __slots__ = ()
-
-    def reverse_transform(self) -> WeightTransform:
-        rev_ops = [op.reverse_op for op in self.operations[::-1]]
-
-        if len(self._original_source_patterns) > 1:
-            return self._reverse_multi_source(rev_ops)
-        return self._reverse_single_source(rev_ops)
-
-    def _reverse_single_source(self, rev_ops: list[ConversionOps]) -> "MistralWeightConverter":
-        orig_src = self._original_source_patterns[0]
-        orig_tgt = self._original_target_patterns[0]
-        new_src = _build_reversed_source(orig_src, orig_tgt, strip_capturing_group=True)
-        cap_group = _re.search(r"\(.*?\)", orig_src)
-
-        if r"\1" in orig_tgt and cap_group:
-            # Suffix-only target: drop everything before (and including) the
-            # capturing group in the original source.
-            src_suffix = orig_src[cap_group.end() :]
-            new_tgt = _unescape_dots(src_suffix.rstrip("$"))
-        else:
-            new_tgt = _build_reversed_target(orig_src)
-        return MistralWeightConverter(source_patterns=new_src, target_patterns=new_tgt, operations=rev_ops)
-
-    def _reverse_multi_source(self, rev_ops: list[ConversionOps]) -> "MistralWeightConverter":
-        orig_tgt = self._original_target_patterns[0]
-        new_src = _re.escape(_unescape_dots(orig_tgt))
-        if any(s.endswith("$") for s in self._original_source_patterns):
-            new_src += "$"
-        new_tgts = [_unescape_dots(s.lstrip("^").rstrip("$")) for s in self._original_source_patterns]
-        return MistralWeightConverter(source_patterns=new_src, target_patterns=new_tgts, operations=rev_ops)
-
-
 _HF_TO_NATIVE_FP8_SUFFIX = {
     "weight_scale_inv": "qscale_weight",
     "activation_scale": "qscale_act",
@@ -176,37 +129,97 @@ def _apply_fp8_suffix_renaming(pattern: str) -> str:
     return pattern
 
 
-class MistralFP8WeightConverter(MistralWeightConverter):
-    r"""``MistralWeightConverter`` that applies FP8 suffix renaming to reversed targets.
+class MistralWeightConverter(WeightConverter):
+    r"""``WeightConverter`` with correct ``reverse_transform`` for Mistral patterns.
 
-    In the reverse direction (HF → native), the FP8 renamings
-    (``weight_scale_inv`` → ``qscale_weight``, ``activation_scale`` →
-    ``qscale_act``) fire on the key *before* converter operations run.
-    The converter operations produce output keys using the original
-    (un-renamed) suffixes, causing a mismatch with the already-renamed
-    ``full_name``.  This subclass applies the same suffix renaming to the
-    reversed target patterns so the output keys match.
+    For **single-source** converters the reversed source is built with
+    ``re.escape`` and the capturing group is stripped so that the result is a
+    suffix-only pattern.  This avoids the ordering issue in
+    ``revert_weight_conversion`` (renamings fire before converters) where
+    prefix renamings would otherwise prevent the converter from matching.
+
+    For **multi-source** converters (MoE expert merging) the single target
+    is ``re.escape``-d into the reversed source and the multiple sources
+    become the reversed targets (with ``\.`` unescaped).
+
+    When `fp8_aware` is set, reversed target patterns additionally get
+    HF FP8 suffixes mapped to native ones (``weight_scale_inv`` →
+    ``qscale_weight``, ``activation_scale`` → ``qscale_act``).
+
+    Attributes:
+        _fp8_aware: Apply FP8 suffix renaming on reversed targets.
     """
 
-    __slots__ = ()
+    __slots__ = ("_fp8_aware",)
+
+    def __init__(
+        self,
+        source_patterns: str | list[str],
+        target_patterns: str | list[str],
+        operations: list[ConversionOps],
+        *,
+        fp8_aware: bool = False,
+    ) -> None:
+        super().__init__(source_patterns, target_patterns, operations)
+        self._fp8_aware = fp8_aware
+
+    def reverse_transform(self) -> WeightTransform:
+        rev_ops = [op.reverse_op for op in self.operations[::-1]]
+
+        if len(self._original_source_patterns) > 1:
+            return self._reverse_multi_source(rev_ops)
+        return self._reverse_single_source(rev_ops)
+
+    def _maybe_apply_fp8(self, targets: list[str]) -> list[str]:
+        if self._fp8_aware:
+            return [_apply_fp8_suffix_renaming(t) for t in targets]
+        return targets
 
     def _reverse_single_source(self, rev_ops: list[ConversionOps]) -> "MistralWeightConverter":
-        converter = super()._reverse_single_source(rev_ops)
-        new_tgts = [_apply_fp8_suffix_renaming(t) for t in converter._original_target_patterns]
-        return MistralFP8WeightConverter(
-            source_patterns=converter._original_source_patterns,
-            target_patterns=new_tgts,
-            operations=converter.operations,
+        orig_src = self._original_source_patterns[0]
+        orig_tgt = self._original_target_patterns[0]
+        new_src = _build_reversed_source(orig_src, orig_tgt, strip_capturing_group=True)
+        cap_group = _re.search(r"\(.*?\)", orig_src)
+
+        if r"\1" in orig_tgt and cap_group:
+            src_suffix = orig_src[cap_group.end() :]
+            new_tgt = _unescape_dots(src_suffix.rstrip("$"))
+        else:
+            new_tgt = _build_reversed_target(orig_src)
+        return MistralWeightConverter(
+            source_patterns=new_src,
+            target_patterns=self._maybe_apply_fp8([new_tgt]),
+            operations=rev_ops,
+            fp8_aware=self._fp8_aware,
         )
 
     def _reverse_multi_source(self, rev_ops: list[ConversionOps]) -> "MistralWeightConverter":
-        converter = super()._reverse_multi_source(rev_ops)
-        new_tgts = [_apply_fp8_suffix_renaming(t) for t in converter._original_target_patterns]
-        return MistralFP8WeightConverter(
-            source_patterns=converter._original_source_patterns,
-            target_patterns=new_tgts,
-            operations=converter.operations,
+        orig_tgt = self._original_target_patterns[0]
+        new_src = _re.escape(_unescape_dots(orig_tgt))
+        if any(s.endswith("$") for s in self._original_source_patterns):
+            new_src += "$"
+        new_tgts = [_unescape_dots(s.lstrip("^").rstrip("$")) for s in self._original_source_patterns]
+        return MistralWeightConverter(
+            source_patterns=new_src,
+            target_patterns=self._maybe_apply_fp8(new_tgts),
+            operations=rev_ops,
+            fp8_aware=self._fp8_aware,
         )
+
+
+def _expand_expert_indices(
+    target_to_tensors: dict[str, list[torch.Tensor]],
+) -> dict[str, torch.Tensor]:
+    r"""Expand ``*`` in target pattern keys to concrete expert indices.
+
+    Turns ``{"experts.*.w1.weight": [t0, t1, ...]}`` into
+    ``{"experts.0.w1.weight": t0, "experts.1.w1.weight": t1, ...}``.
+    """
+    result: dict[str, torch.Tensor] = {}
+    for target, tensors in target_to_tensors.items():
+        for i, t in enumerate(tensors):
+            result[target.replace("*", str(i))] = t
+    return result
 
 
 _FP8_DTYPE = torch.float8_e4m3fn
@@ -279,17 +292,10 @@ class DuplicateAndSplit(ConversionOps):
         if isinstance(tensor, list):
             tensor = tensor[0]
 
-        expert_list = list(tensor.unbind(dim=0))
-        expand = any("*" in t for t in target_patterns)
-
-        if expand:
-            result: dict[str, torch.Tensor] = {}
-            for target in target_patterns:
-                for i, t in enumerate(expert_list):
-                    result[target.replace("*", str(i))] = t.clone()
-            return result
-
-        return {target: [t.clone() for t in expert_list] for target in target_patterns}
+        grouped = {target: [t.clone() for t in tensor.unbind(dim=0)] for target in target_patterns}
+        if any("*" in t for t in target_patterns):
+            return _expand_expert_indices(grouped)
+        return grouped
 
     @property
     def reverse_op(self) -> ConversionOps:
@@ -377,37 +383,23 @@ class FP8ScaleFusionSplit(ConversionOps):
         if len(target_patterns) < 2:
             raise ValueError(f"FP8ScaleFusionSplit needs ≥2 target patterns, got {target_patterns}")
 
-        expand = any("*" in t for t in target_patterns)
-
         is_per_tensor = tensor.ndim == 3 and tensor.shape[1] == 1 and tensor.shape[2] == 1
         if is_per_tensor:
-            # Squeeze back to 0-dim scalars matching native format
             scale_list = [s.squeeze() for s in tensor.flatten(-2, -1).unbind(dim=0)]
-            if expand:
-                result: dict[str, torch.Tensor] = {}
-                for i, s in enumerate(scale_list):
-                    result[target_patterns[0].replace("*", str(i))] = s
-                    result[target_patterns[1].replace("*", str(i))] = s.clone()
-                return result
-            return {
+            grouped = {
                 target_patterns[0]: scale_list,
                 target_patterns[1]: [s.clone() for s in scale_list],
             }
+        else:
+            half = tensor.shape[1] // 2
+            grouped = {
+                target_patterns[0]: list(tensor[:, :half].unbind(dim=0)),
+                target_patterns[1]: list(tensor[:, half:].unbind(dim=0)),
+            }
 
-        n_experts = tensor.shape[0]
-        half = tensor.shape[1] // 2
-        a_scales = list(tensor[:, :half].unbind(dim=0))
-        b_scales = list(tensor[:, half:].unbind(dim=0))
-        if expand:
-            result = {}
-            for i in range(n_experts):
-                result[target_patterns[0].replace("*", str(i))] = a_scales[i]
-                result[target_patterns[1].replace("*", str(i))] = b_scales[i]
-            return result
-        return {
-            target_patterns[0]: a_scales,
-            target_patterns[1]: b_scales,
-        }
+        if any("*" in t for t in target_patterns):
+            return _expand_expert_indices(grouped)
+        return grouped
 
     @property
     def reverse_op(self) -> ConversionOps:
@@ -729,22 +721,42 @@ def _qk_fp8_scale_renamings(
     return entries
 
 
+def _build_layer_renamings(
+    src_prefix: str,
+    tgt_prefix: str,
+    sub_renamings: list[tuple[str, str]],
+) -> list[MistralWeightRenaming]:
+    r"""Build per-layer renamings from a ``(native_suffix, hf_suffix)`` table."""
+    return [MistralWeightRenaming(rf"{src_prefix}{native}", rf"{tgt_prefix}{hf}") for native, hf in sub_renamings]
+
+
+# Shared per-layer sub-renamings for base Mistral / Ministral3 text models.
+_BASE_LAYER_RENAMINGS: list[tuple[str, str]] = [
+    ("attention_norm", "input_layernorm"),
+    ("ffn_norm", "post_attention_layernorm"),
+    (r"attention\.wv", "self_attn.v_proj"),
+    (r"attention\.wo", "self_attn.o_proj"),
+    (r"feed_forward\.w1", "mlp.gate_proj"),
+    (r"feed_forward\.w2", "mlp.down_proj"),
+    (r"feed_forward\.w3", "mlp.up_proj"),
+]
+
+
+def _standard_text_renamings(hf_prefix: str) -> list[MistralWeightRenaming]:
+    r"""Build standard text-model renamings parameterised by `hf_prefix`."""
+    return [
+        MistralWeightRenaming(r"^output", "lm_head"),
+        MistralWeightRenaming(r"^tok_embeddings", f"{hf_prefix}.embed_tokens"),
+        MistralWeightRenaming(r"^norm", f"{hf_prefix}.norm"),
+        *_build_layer_renamings(r"^layers(.*?)", rf"{hf_prefix}.layers\1", _BASE_LAYER_RENAMINGS),
+        *_qk_fp8_scale_renamings(r"^layers(.*?)", rf"{hf_prefix}.layers\1"),
+        MistralWeightRenaming(r"^layers", f"{hf_prefix}.layers"),
+    ] + _fp8_scale_renamings()
+
+
 def mistral_base_native_renamings() -> list[MistralWeightRenaming]:
     r"""Renamings for base Mistral text models (shared by mistral/ministral3)."""
-    return [
-        MistralWeightRenaming("^output", "lm_head"),
-        MistralWeightRenaming("^tok_embeddings", "model.embed_tokens"),
-        MistralWeightRenaming("^norm", "model.norm"),
-        MistralWeightRenaming(r"^layers(.*?)attention_norm", r"model.layers\1input_layernorm"),
-        MistralWeightRenaming(r"^layers(.*?)ffn_norm", r"model.layers\1post_attention_layernorm"),
-        *_qk_fp8_scale_renamings(r"^layers(.*?)", r"model.layers\1"),
-        MistralWeightRenaming(r"^layers(.*?)attention\.wv", r"model.layers\1self_attn.v_proj"),
-        MistralWeightRenaming(r"^layers(.*?)attention\.wo", r"model.layers\1self_attn.o_proj"),
-        MistralWeightRenaming(r"^layers(.*?)feed_forward\.w1", r"model.layers\1mlp.gate_proj"),
-        MistralWeightRenaming(r"^layers(.*?)feed_forward\.w2", r"model.layers\1mlp.down_proj"),
-        MistralWeightRenaming(r"^layers(.*?)feed_forward\.w3", r"model.layers\1mlp.up_proj"),
-        MistralWeightRenaming("^layers", "model.layers"),
-    ] + _fp8_scale_renamings()
+    return _standard_text_renamings("model")
 
 
 def mistral_base_native_converters() -> list[MistralWeightConverter]:
@@ -765,20 +777,7 @@ def mistral_base_native_converters() -> list[MistralWeightConverter]:
 
 def mistral3_native_text_renamings() -> list[MistralWeightRenaming]:
     r"""Renamings for Mistral3 text backbone."""
-    return [
-        MistralWeightRenaming(r"^output", "lm_head"),
-        MistralWeightRenaming(r"^tok_embeddings", "model.language_model.embed_tokens"),
-        MistralWeightRenaming(r"^norm", "model.language_model.norm"),
-        MistralWeightRenaming(r"^layers(.*?)attention_norm", r"model.language_model.layers\1input_layernorm"),
-        MistralWeightRenaming(r"^layers(.*?)ffn_norm", r"model.language_model.layers\1post_attention_layernorm"),
-        *_qk_fp8_scale_renamings(r"^layers(.*?)", r"model.language_model.layers\1"),
-        MistralWeightRenaming(r"^layers(.*?)attention\.wv", r"model.language_model.layers\1self_attn.v_proj"),
-        MistralWeightRenaming(r"^layers(.*?)attention\.wo", r"model.language_model.layers\1self_attn.o_proj"),
-        MistralWeightRenaming(r"^layers(.*?)feed_forward\.w1", r"model.language_model.layers\1mlp.gate_proj"),
-        MistralWeightRenaming(r"^layers(.*?)feed_forward\.w2", r"model.language_model.layers\1mlp.down_proj"),
-        MistralWeightRenaming(r"^layers(.*?)feed_forward\.w3", r"model.language_model.layers\1mlp.up_proj"),
-        MistralWeightRenaming(r"^layers", "model.language_model.layers"),
-    ] + _fp8_scale_renamings()
+    return _standard_text_renamings("model.language_model")
 
 
 def mistral3_native_text_converters() -> list[MistralWeightConverter]:
@@ -807,6 +806,15 @@ def mistral3_native_text_converters() -> list[MistralWeightConverter]:
     ]
 
 
+_VISION_LAYER_RENAMINGS: list[tuple[str, str]] = [
+    (r"attention\.wv", "attention.v_proj"),
+    (r"attention\.wo", "attention.o_proj"),
+    (r"feed_forward\.w1", "feed_forward.gate_proj"),
+    (r"feed_forward\.w2", "feed_forward.down_proj"),
+    (r"feed_forward\.w3", "feed_forward.up_proj"),
+]
+
+
 def mistral3_native_vision_renamings() -> list[MistralWeightRenaming]:
     r"""Renamings for Mistral3 vision encoder keys."""
     return [
@@ -814,11 +822,7 @@ def mistral3_native_vision_renamings() -> list[MistralWeightRenaming]:
         MistralWeightRenaming(r"^vision_language_adapter\.w_out", "model.multi_modal_projector.linear_2"),
         MistralWeightRenaming("^patch_merger", "model.multi_modal_projector.patch_merger"),
         MistralWeightRenaming("^pre_mm_projector_norm", "model.multi_modal_projector.norm"),
-        MistralWeightRenaming(r"^vision_encoder(.*?)attention\.wv", r"model.vision_tower\1attention.v_proj"),
-        MistralWeightRenaming(r"^vision_encoder(.*?)attention\.wo", r"model.vision_tower\1attention.o_proj"),
-        MistralWeightRenaming(r"^vision_encoder(.*?)feed_forward\.w1", r"model.vision_tower\1feed_forward.gate_proj"),
-        MistralWeightRenaming(r"^vision_encoder(.*?)feed_forward\.w2", r"model.vision_tower\1feed_forward.down_proj"),
-        MistralWeightRenaming(r"^vision_encoder(.*?)feed_forward\.w3", r"model.vision_tower\1feed_forward.up_proj"),
+        *_build_layer_renamings(r"^vision_encoder(.*?)", r"model.vision_tower\1", _VISION_LAYER_RENAMINGS),
         MistralWeightRenaming("^vision_encoder", "model.vision_tower"),
     ]
 
@@ -839,25 +843,30 @@ def mistral3_native_vision_converters() -> list[MistralWeightConverter]:
     ]
 
 
+_MISTRAL4_LAYER_RENAMINGS: list[tuple[str, str]] = [
+    ("attention_norm", "input_layernorm"),
+    ("ffn_norm", "post_attention_layernorm"),
+    (r"attention\.wkv_a_with_mqa", "self_attn.kv_a_proj_with_mqa"),
+    (r"attention\.wkv_b", "self_attn.kv_b_proj"),
+    (r"attention\.wq_a", "self_attn.q_a_proj"),
+    (r"attention\.wq_b", "self_attn.q_b_proj"),
+    (r"attention\.wo", "self_attn.o_proj"),
+    (r"attention\.q_a_norm", "self_attn.q_a_layernorm"),
+    (r"attention\.kv_a_norm", "self_attn.kv_a_layernorm"),
+    (r"\.gate\.weight", ".mlp.gate.weight"),
+    (r"shared_experts\.w1", "mlp.shared_experts.gate_proj"),
+    (r"shared_experts\.w2", "mlp.shared_experts.down_proj"),
+    (r"shared_experts\.w3", "mlp.shared_experts.up_proj"),
+]
+
+
 def mistral4_native_renamings() -> list[MistralWeightRenaming]:
     r"""Renamings for Mistral4 model keys."""
     return [
         MistralWeightRenaming(r"^output", "lm_head"),
         MistralWeightRenaming(r"^tok_embeddings", "model.embed_tokens"),
         MistralWeightRenaming(r"^norm", "model.norm"),
-        MistralWeightRenaming(r"^layers(.*?)attention_norm", r"model.layers\1input_layernorm"),
-        MistralWeightRenaming(r"^layers(.*?)ffn_norm", r"model.layers\1post_attention_layernorm"),
-        MistralWeightRenaming(r"^layers(.*?)attention\.wkv_a_with_mqa", r"model.layers\1self_attn.kv_a_proj_with_mqa"),
-        MistralWeightRenaming(r"^layers(.*?)attention\.wkv_b", r"model.layers\1self_attn.kv_b_proj"),
-        MistralWeightRenaming(r"^layers(.*?)attention\.wq_a", r"model.layers\1self_attn.q_a_proj"),
-        MistralWeightRenaming(r"^layers(.*?)attention\.wq_b", r"model.layers\1self_attn.q_b_proj"),
-        MistralWeightRenaming(r"^layers(.*?)attention\.wo", r"model.layers\1self_attn.o_proj"),
-        MistralWeightRenaming(r"^layers(.*?)attention\.q_a_norm", r"model.layers\1self_attn.q_a_layernorm"),
-        MistralWeightRenaming(r"^layers(.*?)attention\.kv_a_norm", r"model.layers\1self_attn.kv_a_layernorm"),
-        MistralWeightRenaming(r"^layers(.*?)\.gate\.weight", r"model.layers\1.mlp.gate.weight"),
-        MistralWeightRenaming(r"^layers(.*?)shared_experts\.w1", r"model.layers\1mlp.shared_experts.gate_proj"),
-        MistralWeightRenaming(r"^layers(.*?)shared_experts\.w2", r"model.layers\1mlp.shared_experts.down_proj"),
-        MistralWeightRenaming(r"^layers(.*?)shared_experts\.w3", r"model.layers\1mlp.shared_experts.up_proj"),
+        *_build_layer_renamings(r"^layers(.*?)", r"model.layers\1", _MISTRAL4_LAYER_RENAMINGS),
         MistralWeightRenaming(r"^layers(.*?experts)", r"model.layers\1"),
     ] + _fp8_scale_renamings()
 
@@ -870,30 +879,34 @@ def mistral4_native_converters() -> list[MistralWeightConverter]:
             target_patterns="mlp.experts.gate_up_proj",
             operations=[MergeModulelist(dim=0), Concatenate(dim=1)],
         ),
-        MistralFP8WeightConverter(
+        MistralWeightConverter(
             source_patterns=[r"experts.*\.w1\.weight_scale_inv", r"experts.*\.w3\.weight_scale_inv"],
             target_patterns="mlp.experts.gate_up_proj_scale_inv",
             operations=[FP8ScaleFusionMerge()],
+            fp8_aware=True,
         ),
-        MistralFP8WeightConverter(
+        MistralWeightConverter(
             source_patterns=[r"experts.*\.w1\.activation_scale", r"experts.*\.w3\.activation_scale"],
             target_patterns="mlp.experts.gate_up_proj_activation_scale",
             operations=[MaxMergeModulelist()],
+            fp8_aware=True,
         ),
         MistralWeightConverter(
             source_patterns=r"experts.*\.w2\.weight$",
             target_patterns="mlp.experts.down_proj",
             operations=[MergeModulelist(dim=0)],
         ),
-        MistralFP8WeightConverter(
+        MistralWeightConverter(
             source_patterns=r"experts.*\.w2\.weight_scale_inv",
             target_patterns="mlp.experts.down_proj_scale_inv",
             operations=[MergeModulelist(dim=0)],
+            fp8_aware=True,
         ),
-        MistralFP8WeightConverter(
+        MistralWeightConverter(
             source_patterns=r"experts.*\.w2\.activation_scale",
             target_patterns="mlp.experts.down_proj_activation_scale",
             operations=[MergeModulelist(dim=0)],
+            fp8_aware=True,
         ),
     ]
 
