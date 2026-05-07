@@ -406,11 +406,15 @@ class AutoProcessor:
                 # For native Mistral checkpoints (no config.json, only params.json + tekken.json),
                 # probe for tekken.json and route to PixtralProcessor which handles the native format.
                 mistral_format = kwargs.pop("mistral_format", None)
-                should_load_mistral = mistral_format is not False and cached_file(
-                    pretrained_model_name_or_path,
-                    "tekken.json",
-                    **cached_file_kwargs,
-                ) is not None
+                should_load_mistral = (
+                    mistral_format is not False
+                    and cached_file(
+                        pretrained_model_name_or_path,
+                        "tekken.json",
+                        **cached_file_kwargs,
+                    )
+                    is not None
+                )
                 if should_load_mistral:
                     processor_class = "PixtralProcessor"
 

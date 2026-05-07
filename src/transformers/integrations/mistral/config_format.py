@@ -156,11 +156,7 @@ class MistralFormatConfig(PreTrainedConfig):
         r"""Propagate internal metadata into nested sub-config dicts.
 
         Composite configs (e.g. Mistral3) have nested dicts like `text_config`
-        and `vision_config`.  When `PreTrainedConfig.from_pretrained()` resolves
-        a sub-config by `model_type`, it replaces the top-level dict with the
-        sub-dict — losing any top-level metadata.  By injecting the keys into
-        every nested sub-config dict upfront, the metadata survives regardless
-        of which sub-dict is selected.
+        and `vision_config`.
         """
         _INTERNAL_KEYS = ("transformers_weights", "_loaded_from_mistral_format", "quantization_config")
         top_level = {k: config_dict[k] for k in _INTERNAL_KEYS if k in config_dict}
@@ -175,9 +171,7 @@ class MistralFormatConfig(PreTrainedConfig):
     def _detect_weight_file(cls, pretrained_model_name_or_path: str | Any, **kwargs) -> str | None:
         r"""Detect the weight file format.
 
-        Probes for HF format files first (`model.safetensors`, `model.safetensors.index.json`).
-        If found, returns `None` (HF format, no override needed).
-        Otherwise probes for consolidated format files and returns the filename.
+        Probes for HF format files first then for consolidated format files and returns the filename.
 
         Returns:
             Weight filename if consolidated format detected, `None` otherwise.

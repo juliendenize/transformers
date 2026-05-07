@@ -295,6 +295,14 @@ def _make_hf_fp8_quant_config(activation_scheme: str = "static") -> Quantization
         }
     )
 
+def _make_non_reversible_quant_config() -> QuantizationConfigMixin:
+    return AutoQuantizationConfig.from_dict(
+        {
+            "quant_method": "gptq",
+            "bits": 4,
+            "group_size": 128,
+        }
+    )
 
 class TestQuantizationArgs:
     def test_valid_tensor_scheme(self) -> None:
@@ -528,6 +536,25 @@ class TestHFToNativeMistral:
         )
         assert native == expected
 
+    def test_reverse_with_non_reversible_quant(self) -> None:
+        hf_quant = _make_non_reversible_quant_config()
+        hf = MistralConfig(
+            hidden_size=4096,
+            num_hidden_layers=32,
+            intermediate_size=14336,
+            num_attention_heads=32,
+            num_key_value_heads=8,
+            rms_norm_eps=1e-5,
+            head_dim=128,
+            vocab_size=32000,
+            max_position_embeddings=32768,
+            quantization_config=hf_quant,
+        )
+        native = _hf_config_to_native_config(hf)
+        assert native.quantization is None
+        assert native.quantization_config is not None
+        assert native.quantization_config.to_dict()["quant_method"] == "gptq"
+
 
 class TestHFToNativeMinistral3:
     def test_basic_reverse(self, ministral3_native_config: MistralNativeConfig) -> None:
@@ -584,6 +611,36 @@ class TestHFToNativeMinistral3:
         assert restored.quantization_config is None
         assert restored.quantization == QuantizationArgs("fp8_e4m3", "TENSOR")
         assert restored == native
+
+    def test_reverse_with_non_reversible_quant(self, yarn_args: YarnArgs, llama4_scaling: Llama4Scaling) -> None:
+        hf_quant = _make_non_reversible_quant_config()
+        hf = Ministral3Config(
+            hidden_size=4096,
+            num_hidden_layers=32,
+            intermediate_size=14336,
+            num_attention_heads=32,
+            num_key_value_heads=8,
+            rms_norm_eps=1e-5,
+            head_dim=128,
+            vocab_size=32000,
+            max_position_embeddings=262144,
+            tie_word_embeddings=True,
+            rope_parameters={
+                "type": "yarn",
+                "rope_theta": 1000000.0,
+                "factor": 16.0,
+                "original_max_position_embeddings": 16384,
+                "beta_fast": 32.0,
+                "beta_slow": 1.0,
+                "mscale_all_dim": 1.0,
+                "llama_4_scaling_beta": 0.1,
+            },
+            quantization_config=hf_quant,
+        )
+        native = _hf_config_to_native_config(hf)
+        assert native.quantization is None
+        assert native.quantization_config is not None
+        assert native.quantization_config.to_dict()["quant_method"] == "gptq"
 
 
 class TestHFToNativeMistral4:
@@ -658,6 +715,43 @@ class TestHFToNativeMistral3:
     def test_roundtrip_ignores_non_roundtrippable_fields(self, mistral3_native_config: MistralNativeConfig) -> None:
         restored = _hf_config_to_native_config(_native_config_to_hf_config(mistral3_native_config))
         assert restored == mistral3_native_config
+
+    def test_reverse_with_non_reversible_quant(self, vision_encoder_args: VisionEncoderArgs) -> None:
+        hf_quant = _make_non_reversible_quant_config()
+        text_config = MistralConfig(
+            hidden_size=4096,
+            num_hidden_layers=32,
+            intermediate_size=14336,
+            num_attention_heads=32,
+            num_key_value_heads=8,
+            rms_norm_eps=1e-5,
+            head_dim=128,
+            vocab_size=32000,
+            max_position_embeddings=131072,
+        )
+        vision_config = PixtralVisionConfig(
+            hidden_size=1024,
+            num_hidden_layers=24,
+            num_attention_heads=16,
+            patch_size=14,
+            image_size=1540,
+            intermediate_size=4096,
+            hidden_act="silu",
+            rope_theta=10000.0,
+        )
+        hf = Mistral3Config(
+            text_config=text_config,
+            vision_config=vision_config,
+            multimodal_projector_bias=False,
+            image_token_id=10,
+            spatial_merge_size=2,
+            vision_feature_layer=-1,
+            quantization_config=hf_quant,
+        )
+        native = _hf_config_to_native_config(hf)
+        assert native.quantization is None
+        assert native.quantization_config is not None
+        assert native.quantization_config.to_dict()["quant_method"] == "gptq"
 
 
 def test_unsupported_hf_config_type_raises() -> None:

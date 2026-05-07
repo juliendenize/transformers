@@ -51,9 +51,9 @@ def _extract_rope_theta(config: PreTrainedConfig) -> float:
     rope_params = getattr(config, "rope_parameters", None)
     if rope_params and isinstance(rope_params, dict) and "rope_theta" in rope_params:
         return float(rope_params["rope_theta"])
-    if hasattr(config, "rope_theta"):
+    elif hasattr(config, "rope_theta"):
         return float(config.rope_theta)
-    return 10000.0
+    raise ValueError("`rope_theta` not found.")
 
 
 def _extract_yarn(config: PreTrainedConfig) -> YarnArgs | None:
@@ -87,7 +87,7 @@ class YarnArgs:
     original_max_position_embeddings: int
     beta: int
     alpha: int
-    apply_scale: bool = False
+    apply_scale: bool
 
 
 class QFormat(str, Enum):
@@ -223,7 +223,10 @@ def _get_maybe_quant_config(
 
     modules_to_not_convert = ["lm_head"]
     if is_vision_model:
-        modules_to_not_convert += ["model.vision_tower", "model.multi_modal_projector"]
+        modules_to_not_convert += [
+            "model.vision_tower",
+            "model.multi_modal_projector",
+        ]
 
     match quantization_args.qformat_weight:
         case QFormat.FP8_E4M3:
@@ -262,8 +265,7 @@ def _get_rope_parameters(
         )
         rope_kwargs["llama_4_scaling_beta"] = llama4_scaling.beta
 
-    if not yarn_args.apply_scale:
-        rope_kwargs["mscale_all_dim"] = 1.0
+    mscale_all_dim = 0.0 if yarn_args.apply_scale else 1.0
 
     return RopeParameters(
         rope_type="yarn",
@@ -272,6 +274,7 @@ def _get_rope_parameters(
         original_max_position_embeddings=yarn_args.original_max_position_embeddings,
         beta_fast=float(yarn_args.beta),
         beta_slow=float(yarn_args.alpha),
+        mscale_all_dim=mscale_all_dim,
         **rope_kwargs,
     )
 
@@ -443,7 +446,7 @@ def _extract_hf_quantization_config(hf_config: PreTrainedConfig) -> Quantization
 
 
 def _hf_quant_config_to_native(hf_config: PreTrainedConfig) -> QuantizationArgs | None:
-    r"""Convert an HF quantization config back to native ``QuantizationArgs``."""
+    r"""Convert an HF quantization config back to native `QuantizationArgs`."""
     quant_cfg = _extract_hf_quantization_config(hf_config)
     if quant_cfg is None:
         return None
@@ -452,6 +455,26 @@ def _hf_quant_config_to_native(hf_config: PreTrainedConfig) -> QuantizationArgs 
         return None
     scheme = _REVERSE_QUANTIZATION_SCHEME_MAP.get(qc.get("activation_scheme", "static"), "TENSOR")
     return QuantizationArgs(qformat_weight=QFormat.FP8_E4M3, qscheme_act=scheme)
+
+
+def _resolve_hf_quant_for_native(
+    hf_config: PreTrainedConfig,
+) -> tuple[QuantizationArgs | None, QuantizationConfigMixin | None]:
+    r"""Resolve an HF quantization config to native fields.
+
+    Tries the direct reverse mapping first. If that is not feasible (e.g.
+    non-fp8 quant method), the original HF config is preserved as-is in
+    `quantization_config` so it is not silently dropped.
+
+    Returns:
+        A `(quantization, quantization_config)` pair where exactly one
+        (or neither) is non-`None`.
+    """
+    native_quant = _hf_quant_config_to_native(hf_config)
+    if native_quant is not None:
+        return native_quant, None
+    hf_quant = _extract_hf_quantization_config(hf_config)
+    return None, hf_quant
 
 
 def _extract_llama4_scaling_from_rope_params(rope_params: dict | RopeParameters | None) -> Llama4Scaling | None:
@@ -488,6 +511,7 @@ def _hf_config_to_native_config(hf_config: MistralHFConfigType) -> MistralNative
 
 def _hf_mistral_to_native(hf_config: MistralConfig) -> MistralNativeConfig:
     assert hf_config.head_dim is not None
+    quantization, quantization_config = _resolve_hf_quant_for_native(hf_config)
 
     return MistralNativeConfig(
         dim=hf_config.hidden_size,
@@ -503,11 +527,14 @@ def _hf_mistral_to_native(hf_config: MistralConfig) -> MistralNativeConfig:
         sliding_window=hf_config.sliding_window,
         tied_embeddings=hf_config.tie_word_embeddings,
         yarn=_extract_yarn(hf_config),
-        quantization=_hf_quant_config_to_native(hf_config),
+        quantization=quantization,
+        quantization_config=quantization_config,
     )
 
 
 def _hf_ministral3_to_native(hf_config: Ministral3Config) -> MistralNativeConfig:
+    quantization, quantization_config = _resolve_hf_quant_for_native(hf_config)
+
     return MistralNativeConfig(
         dim=hf_config.hidden_size,
         n_layers=hf_config.num_hidden_layers,
@@ -525,7 +552,8 @@ def _hf_ministral3_to_native(hf_config: Ministral3Config) -> MistralNativeConfig
         llama_4_scaling=_extract_llama4_scaling_from_rope_params(
             getattr(hf_config, "rope_parameters", None),
         ),
-        quantization=_hf_quant_config_to_native(hf_config),
+        quantization=quantization,
+        quantization_config=quantization_config,
     )
 
 
@@ -536,6 +564,7 @@ def _hf_mistral4_to_native(hf_config: Mistral4Config) -> MistralNativeConfig:
     assert hf_config.first_k_dense_replace is not None
     assert hf_config.n_group is not None
     assert hf_config.topk_group is not None
+    quantization, quantization_config = _resolve_hf_quant_for_native(hf_config)
 
     return MistralNativeConfig(
         dim=hf_config.hidden_size,
@@ -567,7 +596,8 @@ def _hf_mistral4_to_native(hf_config: Mistral4Config) -> MistralNativeConfig:
             num_expert_groups=hf_config.n_group,
             num_expert_groups_per_tok=hf_config.topk_group,
         ),
-        quantization=_hf_quant_config_to_native(hf_config),
+        quantization=quantization,
+        quantization_config=quantization_config,
     )
 
 
@@ -595,8 +625,10 @@ def _hf_mistral3_to_native(hf_config: Mistral3Config) -> MistralNativeConfig:
         add_pre_mm_projector_layer_norm=True,
     )
 
+    quantization, quantization_config = _resolve_hf_quant_for_native(hf_config)
     text_native.vision_encoder = vision_encoder
-    text_native.quantization = _hf_quant_config_to_native(hf_config)
+    text_native.quantization = quantization
+    text_native.quantization_config = quantization_config
     return text_native
 
 
@@ -725,19 +757,19 @@ def native_config_for_model_type(model_type: str, params: dict) -> MistralNative
 
 
 def native_config_from_hf_config(model_type: str, hf_config: MistralHFConfigType) -> MistralNativeConfig:
-    r"""Convert an HF config to a ``MistralNativeConfig``, dispatched by model type.
+    r"""Convert an HF config to a `MistralNativeConfig`, dispatched by model type.
 
     This is a thin wrapper around :func:`hf_config_to_native_config` that
-    accepts a ``model_type`` string for compatibility with the config-format
+    accepts a `model_type` string for compatibility with the config-format
     integration layer.
 
     Args:
-        model_type: One of ``"mistral"``, ``"ministral3"``, ``"mistral4"``,
-            ``"mistral3"``.
+        model_type: One of `"mistral"`, `"ministral3"`, `"mistral4"`,
+            `"mistral3"`.
         hf_config: The HuggingFace config to convert.
 
     Raises:
-        ValueError: If ``model_type`` is unknown or the config type is
+        ValueError: If `model_type` is unknown or the config type is
             unsupported.
     """
     try:

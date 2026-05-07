@@ -49,7 +49,9 @@ class MistralConverter:
 
     @property
     def tekken_metadata(self) -> dict[str, Any]:
-        assert self._tekken_metadata is not None, "Only accessible when instance is created by `from_tekken_file` method."
+        assert self._tekken_metadata is not None, (
+            "Only accessible when instance is created by `from_tekken_file` method."
+        )
         return self._tekken_metadata
 
     @classmethod
