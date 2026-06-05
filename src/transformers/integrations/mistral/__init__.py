@@ -14,13 +14,24 @@ __all__ = [
     "_hf_config_to_native_config",
     "_native_config_to_hf_config",
     "_parse_native_config_from_dict",
+    "convert_state_dict_to_native",
+    "mistral3_native_text_converters",
+    "mistral3_native_text_renamings",
+    "mistral3_native_vision_converters",
+    "mistral3_native_vision_renamings",
+    "mistral4_native_converters",
+    "mistral4_native_renamings",
+    "mistral_base_native_converters",
+    "mistral_base_native_renamings",
     "native_config_for_model_type",
     "native_config_from_hf_config",
+    "save_native_mistral_format",
 ]
 
 _TOKENIZER_MODULE = "tokenizer"
 _PARAMS_MODULE = "params_conversion"
 _CONFIG_FORMAT_MODULE = "config_format"
+_WEIGHT_MODULE = "weight_conversion"
 
 _ATTR_TO_MODULE = {
     "MistralConverter": _TOKENIZER_MODULE,
@@ -29,8 +40,18 @@ _ATTR_TO_MODULE = {
     "_hf_config_to_native_config": _PARAMS_MODULE,
     "_native_config_to_hf_config": _PARAMS_MODULE,
     "_parse_native_config_from_dict": _PARAMS_MODULE,
+    "convert_state_dict_to_native": _WEIGHT_MODULE,
+    "mistral3_native_text_converters": _WEIGHT_MODULE,
+    "mistral3_native_text_renamings": _WEIGHT_MODULE,
+    "mistral3_native_vision_converters": _WEIGHT_MODULE,
+    "mistral3_native_vision_renamings": _WEIGHT_MODULE,
+    "mistral4_native_converters": _WEIGHT_MODULE,
+    "mistral4_native_renamings": _WEIGHT_MODULE,
+    "mistral_base_native_converters": _WEIGHT_MODULE,
+    "mistral_base_native_renamings": _WEIGHT_MODULE,
     "native_config_for_model_type": _PARAMS_MODULE,
     "native_config_from_hf_config": _PARAMS_MODULE,
+    "save_native_mistral_format": _WEIGHT_MODULE,
 }
 
 

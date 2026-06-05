@@ -379,18 +379,41 @@ class LinearToConv3d(ConversionOps):
 
 
 class PermuteForRope(ConversionOps):
-    """
-    Applies the permutation required to convert complex RoPE weights to the split sin/cos format.
+    r"""Applies the permutation required to convert complex RoPE weights to the split sin/cos format.
+
+    Args:
+        n_heads_attr: Dotted attribute path on the config object to resolve the number
+            of attention heads (e.g. `"num_attention_heads"` or `"vision_config.num_attention_heads"`).
+        inverse: When `True`, applies the inverse permutation (HF → native format).
     """
 
-    def __init__(self):
-        pass
+    def __init__(self, n_heads_attr: str = "num_attention_heads", inverse: bool = False):
+        self.n_heads_attr = n_heads_attr
+        self.inverse = inverse
+
+    def _resolve_attr(self, config: Any) -> int:
+        r"""Walk a dotted attribute path on `config` and return the resolved value."""
+        obj = config
+        for segment in self.n_heads_attr.split("."):
+            try:
+                obj = getattr(obj, segment)
+            except AttributeError:
+                raise AttributeError(
+                    f"Config {type(config).__name__!r} has no attribute {segment!r} "
+                    f"(resolving path {self.n_heads_attr!r})."
+                ) from None
+        return obj
 
     def _apply(self, tensor: torch.Tensor) -> torch.Tensor:
         dim1, dim2 = tensor.shape
-        n_heads = self.config.getattr("num_attention_heads", 1)
+        n_heads = self._resolve_attr(self.config)
 
-        tensor = tensor.view(n_heads, dim1 // n_heads // 2, 2, dim2)
+        if self.inverse:
+            # Inverse: view(n, 2, h/2, d).transpose(1,2).reshape(dim1, dim2)
+            tensor = tensor.view(n_heads, 2, dim1 // n_heads // 2, dim2)
+        else:
+            # Forward: view(n, h/2, 2, d).transpose(1,2).reshape(dim1, dim2)
+            tensor = tensor.view(n_heads, dim1 // n_heads // 2, 2, dim2)
         tensor = tensor.transpose(1, 2).reshape(dim1, dim2)
         return tensor
 
@@ -400,7 +423,7 @@ class PermuteForRope(ConversionOps):
         input_dict: dict[str, list[torch.Tensor]],
         source_patterns: list[str],
         target_patterns: list[str],
-        config,
+        config=None,
         **kwargs,
     ) -> dict[str, list[torch.Tensor]]:
         self.config = config
@@ -408,8 +431,18 @@ class PermuteForRope(ConversionOps):
         for key, tensors in input_dict.items():
             if len(tensors) != 1:
                 raise ValueError("PermuteForRope expects a single tensor per key.")
-            output[key] = [self._apply(tensors[0])]
+            # Use target pattern as the output key so WeightConverter.convert()
+            # can locate the key as a substring of the full parameter name.
+            out_key = target_patterns[0] if len(target_patterns) == 1 else key
+            output[out_key] = [self._apply(tensors[0])]
         return output
+
+    @property
+    def reverse_op(self) -> ConversionOps:
+        return PermuteForRope(n_heads_attr=self.n_heads_attr, inverse=not self.inverse)
+
+    def __repr__(self) -> str:
+        return f"PermuteForRope(n_heads_attr={self.n_heads_attr!r}, inverse={self.inverse})"
 
 
 class ErnieFuseAndSplitTextVisionExperts(ConversionOps):
@@ -899,10 +932,16 @@ class PrefixChange(WeightRenaming):
 
 
 # List of classes that are known to be able to use m:n
-_INTERNAL_MANY_TO_MANY_CONVERSIONS = (
+_INTERNAL_MANY_TO_MANY_CONVERSIONS: list[type[ConversionOps]] = [
     ErnieFuseAndSplitTextVisionExperts,
     ErnieSplitAndDecoupleTextVisionExperts,
-)
+]
+
+
+def register_many_to_many_conversion(cls: type[ConversionOps]) -> None:
+    r"""Register a `ConversionOps` subclass as supporting many-to-many weight patterns."""
+    if cls not in _INTERNAL_MANY_TO_MANY_CONVERSIONS:
+        _INTERNAL_MANY_TO_MANY_CONVERSIONS.append(cls)
 
 
 class WeightConverter(WeightTransform):
@@ -916,7 +955,7 @@ class WeightConverter(WeightTransform):
 
         if bool(len(self.source_patterns) - 1) + bool(len(self.target_patterns) - 1) >= 2:
             # We allow many-to-many only if we use an internal operation that can handle it
-            if not any(isinstance(op, _INTERNAL_MANY_TO_MANY_CONVERSIONS) for op in self.operations):
+            if not any(isinstance(op, tuple(_INTERNAL_MANY_TO_MANY_CONVERSIONS)) for op in self.operations):
                 raise ValueError(
                     f"source keys={self.source_patterns}, target_patterns={self.target_patterns} but you can only have one to many, one to one or many to one."
                 )

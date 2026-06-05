@@ -29,6 +29,16 @@ from .core_model_loading import (
     WeightRenaming,
     WeightTransform,
 )
+from .integrations.mistral.weight_conversion import (
+    mistral3_native_text_converters,
+    mistral3_native_text_renamings,
+    mistral3_native_vision_converters,
+    mistral3_native_vision_renamings,
+    mistral4_native_converters,
+    mistral4_native_renamings,
+    mistral_base_native_converters,
+    mistral_base_native_renamings,
+)
 
 
 if TYPE_CHECKING:
@@ -86,7 +96,6 @@ _MODEL_TO_CONVERSION_PATTERN = {
     "gemma3": "llava",
     "internvl": "llava",
     "vipllava": "llava",
-    "mistral3": "llava",
     "pp_chart2table": "llava",
     "voxtral": "qwen2_audio",
     "voxtral_realtime": "qwen2_audio",
@@ -105,7 +114,6 @@ _MODEL_TO_CONVERSION_PATTERN = {
     "Gemma3Model": "LlavaModel",
     "InternVLModel": "LlavaModel",
     "VipLlavaModel": "LlavaModel",
-    "Mistral3Model": "LlavaModel",
     "PPChart2TableModel": "LlavaModel",
     "LlavaNextModel": "LlavaModel",
     "LlavaNextVideoModel": "LlavaModel",
@@ -128,6 +136,14 @@ _MODEL_TO_CONVERSION_PATTERN = {
     "ViTMAEModel": "ViTModel",
     "ViTMSNModel": "ViTModel",
     "VivitModel": "ViTModel",
+}
+
+# Model types whose conversion mapping already covers their submodules' model types.
+# When a parent model_type lists child model_types here, the recursive submodule scan
+# in get_model_conversion_mapping() will skip those children, preventing duplicate or
+# conflicting converters from being added.
+_COVERED_SUBMODULE_MODEL_TYPES: dict[str, set[str]] = {
+    "mistral3": {"mistral", "ministral3", "mistral4"},
 }
 
 
@@ -1311,6 +1327,17 @@ def _build_checkpoint_conversion_mapping():
         WeightRenaming("mlp.shared_expert.", "mlp.shared_experts."),
     ]
 
+    mapping["mistral"] = mistral_base_native_renamings() + mistral_base_native_converters()
+    mapping["ministral3"] = mistral_base_native_renamings() + mistral_base_native_converters()
+    mapping["mistral3"] = (
+        mistral3_native_vision_renamings()
+        + mistral3_native_vision_converters()
+        + mistral3_native_text_renamings()
+        + mistral3_native_text_converters()
+    )
+
+    mapping["mistral4"] = mistral4_native_renamings() + mistral4_native_converters()
+
     for model_type, base_pattern in _MODEL_TO_CONVERSION_PATTERN.items():
         if model_type in mapping:
             continue
@@ -1455,6 +1482,14 @@ def get_model_conversion_mapping(
         # be reachable so their base transforms are picked up and scoped.
         if not found_via_class and model_type:
             seen_identifiers[model_type].append(module_name)
+
+        # Some composite models already handle their submodules' conversions
+        # (e.g. mistral3 already includes text-backbone converters for the inner
+        # "mistral" language_model). Pre-populate seen_identifiers so the
+        # recursive scan below skips those submodules.
+        if model_type:
+            for covered in _COVERED_SUBMODULE_MODEL_TYPES.get(model_type, set()):
+                seen_identifiers[covered].append(module_name)
 
     if add_legacy:
         weight_conversions.extend(get_checkpoint_conversion_mapping("legacy"))
