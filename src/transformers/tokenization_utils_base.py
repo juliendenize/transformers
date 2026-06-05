@@ -1981,6 +1981,7 @@ class PreTrainedTokenizerBase(PushToHubMixin):
         legacy_format: bool | None = None,
         filename_prefix: str | None = None,
         push_to_hub: bool = False,
+        save_format: str | None = None,
         **kwargs,
     ) -> tuple[str, ...]:
         """
@@ -2012,12 +2013,24 @@ class PreTrainedTokenizerBase(PushToHubMixin):
                 Whether or not to push your model to the Hugging Face model hub after saving it. You can specify the
                 repository you want to push to with `repo_id` (will default to the name of `save_directory` in your
                 namespace).
+            save_format (`str`, *optional*):
+                ``"mistral"`` to save as native ``tekken.json`` (requires that the tokenizer carries ``tekken_metadata``
+                in its ``init_kwargs``).  ``"hf"`` or *None* for the default HuggingFace format.
             kwargs (`dict[str, Any]`, *optional*):
                 Additional key word arguments passed along to the [`~utils.PushToHubMixin.push_to_hub`] method.
 
         Returns:
             A tuple of `str`: The files saved.
         """
+
+        if save_format is not None and save_format not in ("hf", "mistral"):
+            raise ValueError(f"Unknown save_format={save_format!r}. Supported values: 'hf', 'mistral'.")
+
+        if save_format == "mistral":
+            from transformers.integrations.mistral.tokenizer import save_as_tekken
+
+            output_path = save_as_tekken(self, save_directory)
+            return (str(output_path),)
 
         if os.path.isfile(save_directory):
             logger.error(f"Provided path ({save_directory}) should be a directory, not a file")
