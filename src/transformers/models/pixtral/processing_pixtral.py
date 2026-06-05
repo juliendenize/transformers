@@ -15,6 +15,8 @@
 Processor class for Pixtral.
 """
 
+import os
+
 import numpy as np
 
 from ...feature_extraction_utils import BatchFeature
@@ -26,7 +28,7 @@ from ...processing_utils import (
     Unpack,
 )
 from ...tokenization_utils_base import PreTokenizedInput, TextInput
-from ...utils import auto_docstring, is_vision_available, logging
+from ...utils import auto_docstring, cached_file, is_vision_available, logging
 from ...utils.import_utils import requires
 
 
@@ -101,6 +103,147 @@ class PixtralProcessor(ProcessorMixin):
     @property
     def image_token_ids(self) -> list[int]:
         return [self.image_token_id, self.image_break_token_id, self.image_end_token_id]
+
+    @classmethod
+    def _load_tokenizer_from_pretrained(cls, sub_processor_type, pretrained_model_name_or_path, **kwargs):
+        """Use `MistralCommonBackend` when the checkpoint contains a `tekken.json`
+        and `mistral-common` is installed. Otherwise fall back to the standard
+        `AutoTokenizer` resolution (respects `tokenizer_config.json`)."""
+        from ...integrations.mistral import resolve_mistral_format
+
+        use_mistral, _ = resolve_mistral_format(
+            pretrained_model_name_or_path,
+            mistral_format=kwargs.pop("mistral_format", None),
+            cache_dir=kwargs.get("cache_dir"),
+            force_download=kwargs.get("force_download", False),
+            local_files_only=kwargs.get("local_files_only", False),
+            revision=kwargs.get("revision", "main"),
+            token=kwargs.get("token"),
+        )
+        if use_mistral:
+            from ...tokenization_mistral_common import _VALID_PRETRAINED_KWARGS, MistralCommonBackend
+
+            logger.info("Using MistralCommonBackend for tokenization.")
+            filtered = {k: v for k, v in kwargs.items() if k in _VALID_PRETRAINED_KWARGS}
+            return MistralCommonBackend.from_pretrained(pretrained_model_name_or_path, **filtered)
+
+        return super()._load_tokenizer_from_pretrained(sub_processor_type, pretrained_model_name_or_path, **kwargs)
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        pretrained_model_name_or_path: str | os.PathLike,
+        cache_dir: str | os.PathLike | None = None,
+        force_download: bool = False,
+        local_files_only: bool = False,
+        token: str | bool | None = None,
+        revision: str = "main",
+        **kwargs,
+    ) -> "PixtralProcessor":
+        r"""Instantiate a [`PixtralProcessor`] from a pretrained checkpoint.
+
+        In addition to the standard HuggingFace processor files, this method supports
+        native Mistral checkpoints that contain `tekken.json` and `params.json` instead
+        of `processor_config.json` / `tokenizer.json`.
+
+        Args:
+            pretrained_model_name_or_path (`str` or `os.PathLike`):
+                Path, model id, or Hub identifier.
+            cache_dir (`str` or `os.PathLike`, *optional*):
+                Where to cache downloaded files.
+            force_download (`bool`, *optional*, defaults to `False`):
+                Whether to force re-download.
+            local_files_only (`bool`, *optional*, defaults to `False`):
+                Whether to only look at local files.
+            token (`str` or `bool`, *optional*):
+                Authentication token for the Hub.
+            revision (`str`, *optional*, defaults to `"main"`):
+                Git revision to use.
+            **kwargs:
+                Additional keyword arguments. The extra keyword `mistral_format`
+                (`bool`, *optional*) controls format detection — see
+                [`resolve_mistral_format`] for semantics.
+        """
+        from ...integrations.mistral import resolve_mistral_format
+
+        mistral_format = kwargs.pop("mistral_format", None)
+
+        _cache_kwargs = {
+            "cache_dir": cache_dir,
+            "force_download": force_download,
+            "local_files_only": local_files_only,
+            "revision": revision,
+        }
+        if token is not None:
+            _cache_kwargs["token"] = token
+
+        use_mistral, tekken_file = resolve_mistral_format(
+            pretrained_model_name_or_path, mistral_format, **_cache_kwargs
+        )
+
+        if not use_mistral:
+            return super().from_pretrained(
+                pretrained_model_name_or_path,
+                cache_dir=cache_dir,
+                force_download=force_download,
+                local_files_only=local_files_only,
+                token=token,
+                revision=revision,
+                **kwargs,
+            )
+
+        # Native format: need params.json too
+        params_file = cached_file(pretrained_model_name_or_path, "params.json", **_cache_kwargs)
+        if params_file is None:
+            raise OSError(
+                f"Cannot find 'params.json' at '{pretrained_model_name_or_path}'. "
+                "Both 'tekken.json' and 'params.json' are required to load a native Mistral processor."
+            )
+
+        chat_template = None
+        try:
+            processor_dict, _ = cls.get_processor_dict(
+                pretrained_model_name_or_path,
+                cache_dir=cache_dir,
+                force_download=force_download,
+                local_files_only=local_files_only,
+                token=token,
+                revision=revision,
+                **kwargs,
+            )
+            chat_template = processor_dict.get("chat_template")
+        except OSError:
+            pass
+
+        from ...integrations.mistral import convert_tekken_image_processor
+
+        return convert_tekken_image_processor(
+            tokenizer_file=tekken_file,
+            params_file=params_file,
+            chat_template=chat_template,
+        )
+
+    def apply_chat_template(self, conversation, **kwargs):
+        """Applies a chat template to the conversation.
+
+        When the tokenizer is a [`MistralCommonBackend`], delegates directly to it
+        (using ``mistral-common``'s chat completion protocol). Otherwise falls back
+        to the Jinja2-based [`ProcessorMixin`] implementation.
+
+        Args:
+            conversation: The conversation to apply the template to.
+            **kwargs: Additional keyword arguments forwarded to the underlying
+                ``apply_chat_template`` implementation.
+
+        Returns:
+            The formatted conversation output.
+        """
+        from ...tokenization_mistral_common import MistralCommonBackend
+
+        if not isinstance(self.tokenizer, MistralCommonBackend):
+            return super().apply_chat_template(conversation, **kwargs)
+
+        return self.tokenizer.apply_chat_template(conversation, **kwargs)
 
     @auto_docstring
     def __call__(
