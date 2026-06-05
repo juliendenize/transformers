@@ -1,4 +1,4 @@
-"""Mistral native format integration: tokenizer conversion utilities."""
+"""Mistral native format integration: tokenizer and config conversion utilities."""
 
 from __future__ import annotations
 
@@ -9,12 +9,25 @@ from types import ModuleType
 
 __all__ = [
     "MistralConverter",
+    "MistralNativeConfig",
+    "_hf_config_to_native_config",
+    "_native_config_to_hf_config",
+    "_parse_native_config_from_dict",
+    "native_config_for_model_type",
+    "native_config_from_hf_config",
 ]
 
-_MODULE = "tokenizer"
+_TOKENIZER_MODULE = "tokenizer"
+_PARAMS_MODULE = "params_conversion"
 
 _ATTR_TO_MODULE = {
-    "MistralConverter": _MODULE,
+    "MistralConverter": _TOKENIZER_MODULE,
+    "MistralNativeConfig": _PARAMS_MODULE,
+    "_hf_config_to_native_config": _PARAMS_MODULE,
+    "_native_config_to_hf_config": _PARAMS_MODULE,
+    "_parse_native_config_from_dict": _PARAMS_MODULE,
+    "native_config_for_model_type": _PARAMS_MODULE,
+    "native_config_from_hf_config": _PARAMS_MODULE,
 }
 
 
