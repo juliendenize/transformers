@@ -15,7 +15,7 @@
 
 from huggingface_hub.dataclasses import strict
 
-from ...configuration_utils import PreTrainedConfig
+from ...integrations.mistral.config_format import MistralFormatConfig
 from ...modeling_rope_utils import RopeParameters
 from ...utils import auto_docstring, logging
 
@@ -25,7 +25,7 @@ logger = logging.get_logger(__name__)
 
 @auto_docstring(checkpoint="mistralai/Ministral-3-8B-Base-2512")
 @strict
-class Ministral3Config(PreTrainedConfig):
+class Ministral3Config(MistralFormatConfig):
     r"""
     Example:
 

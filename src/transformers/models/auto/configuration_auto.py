@@ -371,7 +371,41 @@ class AutoConfig:
         trust_remote_code = kwargs.pop("trust_remote_code", None)
         code_revision = kwargs.pop("code_revision", None)
 
-        config_dict, unused_kwargs = PreTrainedConfig.get_config_dict(pretrained_model_name_or_path, **kwargs)
+        config_error = None
+        try:
+            config_dict, unused_kwargs = PreTrainedConfig.get_config_dict(pretrained_model_name_or_path, **kwargs)
+        except OSError as e:
+            # Check if this is a native Mistral checkpoint with params.json instead of config.json.
+            error_msg = str(e).lower()
+            is_missing_file = (
+                "does not appear to have" in error_msg
+                or "is not a local folder" in error_msg
+                or "can't find" in error_msg
+            )
+            if not is_missing_file:
+                raise
+            config_error = e
+            config_dict = {}
+            unused_kwargs = kwargs
+
+        # Fallback: try Mistral params.json when config.json is absent or empty.
+        # get_config_dict raises OSError for remote repos but silently returns {}
+        # for local directories missing config.json — this single block handles both.
+        if not config_dict or "model_type" not in config_dict:
+            try:
+                from ...integrations.mistral.config_format import MistralFormatConfig
+
+                config_dict, unused_kwargs = MistralFormatConfig._get_config_dict_from_params_json(
+                    pretrained_model_name_or_path, **kwargs
+                )
+                logger.info(
+                    "Loaded config from native Mistral 'params.json' for '%s'.",
+                    pretrained_model_name_or_path,
+                )
+            except (OSError, ImportError, ValueError):
+                if config_error is not None:
+                    raise config_error
+
         has_remote_code = "auto_map" in config_dict and "AutoConfig" in config_dict["auto_map"]
         has_local_code = "model_type" in config_dict and config_dict["model_type"] in CONFIG_MAPPING
         explicit_local_code = has_local_code and not CONFIG_MAPPING[config_dict["model_type"]].__module__.startswith(

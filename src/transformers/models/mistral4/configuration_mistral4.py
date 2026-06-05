@@ -15,14 +15,14 @@
 
 from huggingface_hub.dataclasses import strict
 
-from ...configuration_utils import PreTrainedConfig
+from ...integrations.mistral.config_format import MistralFormatConfig
 from ...modeling_rope_utils import RopeParameters
 from ...utils import auto_docstring
 
 
 @auto_docstring(checkpoint="mistralai/Mistral-Small-4-119B-2603")
 @strict
-class Mistral4Config(PreTrainedConfig):
+class Mistral4Config(MistralFormatConfig):
     r"""
     n_group (`int`, *optional*, defaults to 1):
         Number of groups for routed experts.

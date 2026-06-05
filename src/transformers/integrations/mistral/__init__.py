@@ -9,6 +9,7 @@ from types import ModuleType
 
 __all__ = [
     "MistralConverter",
+    "MistralFormatConfig",
     "MistralNativeConfig",
     "_hf_config_to_native_config",
     "_native_config_to_hf_config",
@@ -19,9 +20,11 @@ __all__ = [
 
 _TOKENIZER_MODULE = "tokenizer"
 _PARAMS_MODULE = "params_conversion"
+_CONFIG_FORMAT_MODULE = "config_format"
 
 _ATTR_TO_MODULE = {
     "MistralConverter": _TOKENIZER_MODULE,
+    "MistralFormatConfig": _CONFIG_FORMAT_MODULE,
     "MistralNativeConfig": _PARAMS_MODULE,
     "_hf_config_to_native_config": _PARAMS_MODULE,
     "_native_config_to_hf_config": _PARAMS_MODULE,
