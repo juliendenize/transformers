@@ -13,6 +13,8 @@
 # limitations under the License.
 """Testing suite for the PyTorch GotOcr2 model."""
 
+import os
+import tempfile
 import unittest
 
 import accelerate
@@ -41,6 +43,7 @@ from ...test_pipeline_mixin import PipelineTesterMixin
 
 if is_torch_available():
     import torch
+    from safetensors.torch import save_file
 
     from transformers import (
         Mistral3ForConditionalGeneration,
@@ -229,6 +232,58 @@ class Mistral3ModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterM
     @unittest.skip("Pixtral does not support attention interfaces.")
     def test_flex_attention_with_grads(self):
         pass
+
+    def test_load_from_hf_format_checkpoint(self):
+        """Verify mistral3 can load from HF-format checkpoints (language_model.model.* keys).
+
+        HF-format checkpoints use a different key convention than the model's internal state dict.
+        This test catches regressions where the conversion mapping fails to rename HF-format keys.
+        """
+        config = self.model_tester.get_config()
+        model = Mistral3ForConditionalGeneration(config)
+        original_state_dict = model.state_dict()
+
+        # Build a state dict with HF-format keys (the "source" serialized format
+        # used by published checkpoints on the Hub)
+        hf_format_state_dict = {}
+        for key, value in original_state_dict.items():
+            new_key = key
+            if key.startswith("lm_head."):
+                new_key = "language_model." + key
+            elif key.startswith("model.language_model."):
+                new_key = "language_model.model." + key[len("model.language_model.") :]
+            elif key.startswith("model.vision_tower."):
+                new_key = "vision_tower." + key[len("model.vision_tower.") :]
+            elif key.startswith("model.multi_modal_projector."):
+                new_key = "multi_modal_projector." + key[len("model.multi_modal_projector.") :]
+            hf_format_state_dict[new_key] = value
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Save config
+            model.config.save_pretrained(tmpdir)
+            # Save HF-format weights (clone to avoid shared-memory error with safetensors)
+            save_file(
+                {k: v.clone() for k, v in hf_format_state_dict.items()}, os.path.join(tmpdir, "model.safetensors")
+            )
+
+            # Load and verify - this will fail if conversion mapping doesn't handle HF-format keys
+            loaded_model = Mistral3ForConditionalGeneration.from_pretrained(tmpdir)
+            loaded_state_dict = loaded_model.state_dict()
+
+            # Check all keys match
+            self.assertEqual(
+                sorted(original_state_dict.keys()),
+                sorted(loaded_state_dict.keys()),
+                "Loaded model has different keys than original",
+            )
+
+            # Check all values match
+            for key in original_state_dict:
+                torch.testing.assert_close(
+                    original_state_dict[key],
+                    loaded_state_dict[key],
+                    msg=f"Mismatch for key {key}",
+                )
 
 
 @slow

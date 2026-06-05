@@ -4843,6 +4843,13 @@ class ModelTesterMixin:
                         if (match := conversion._scoped_match(key)) is not None:
                             matched_groups.add(match[2].lastgroup)  # "g0", "g1", ...
 
+                    # Models that support multiple checkpoint formats (e.g. both HF-format and
+                    # native-format keys) will have conversions whose source patterns only match
+                    # one of those formats.  When saving, only one format is produced, so
+                    # alternative-format conversions won't match any saved key — skip them.
+                    if len(matched_groups) == 0:
+                        continue
+
                     for pattern_index, source_pattern in enumerate(conversion.source_patterns):
                         # Some patterns are written for gen-model only and won't be applied on base model
                         if "lm_head" in source_pattern and model_class not in [

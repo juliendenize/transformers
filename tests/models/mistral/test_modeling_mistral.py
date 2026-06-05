@@ -14,9 +14,11 @@
 """Testing suite for the PyTorch Mistral model."""
 
 import gc
+import os
 import unittest
 
 import pytest
+from huggingface_hub import snapshot_download
 from parameterized import parameterized
 
 from transformers import AutoTokenizer, BitsAndBytesConfig, DynamicCache, is_torch_available, set_seed
@@ -24,6 +26,7 @@ from transformers.cache_utils import DynamicSlidingWindowLayer
 from transformers.testing_utils import (
     DeviceProperties,
     Expectations,
+    _run_slow_tests,
     backend_empty_cache,
     cleanup,
     get_device_properties,
@@ -74,10 +77,14 @@ class MistralIntegrationTest(unittest.TestCase):
     # This variable is used to determine which accelerator are we using for our runners (e.g. A10 or T4)
     # Depending on the hardware we get different logits / generations
     device_properties: DeviceProperties = (None, None, None)
+    model_id = "mistralai/Mistral-7B-v0.1"
+    snapshot_path = None
 
     @classmethod
     def setUpClass(cls):
         cls.device_properties = get_device_properties()
+        if _run_slow_tests:
+            cls.snapshot_path = snapshot_download(cls.model_id, token=os.environ.get("HF_TOKEN"))
 
     def setUp(self):
         cleanup(torch_device, gc_collect=True)
@@ -88,7 +95,7 @@ class MistralIntegrationTest(unittest.TestCase):
     @slow
     def test_model_7b_logits(self):
         input_ids = [1, 306, 4658, 278, 6593, 310, 2834, 338]
-        model = MistralForCausalLM.from_pretrained("mistralai/Mistral-7B-v0.1", device_map="auto", dtype=torch.float16)
+        model = MistralForCausalLM.from_pretrained(self.snapshot_path, device_map="auto", dtype=torch.float16)
         input_ids = torch.tensor([input_ids]).to(model.model.embed_tokens.weight.device)
         with torch.no_grad():
             out = model(input_ids).logits.float().cpu()
@@ -117,9 +124,9 @@ class MistralIntegrationTest(unittest.TestCase):
         EXPECTED_TEXT_COMPLETION = "My favourite condiment is 100% ketchup. I’m not a fan of mustard, mayo,"
 
         prompt = "My favourite condiment is "
-        tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=False)
+        tokenizer = AutoTokenizer.from_pretrained(self.snapshot_path, use_fast=False)
         model = MistralForCausalLM.from_pretrained(
-            "mistralai/Mistral-7B-v0.1",
+            self.snapshot_path,
             device_map={"": torch_device},
             quantization_config=BitsAndBytesConfig(load_in_4bit=True),
         )
@@ -139,7 +146,7 @@ class MistralIntegrationTest(unittest.TestCase):
         # An input with 4097 tokens that is above the size of the sliding window
         input_ids = [1] + [306, 338] * 2048
         model = MistralForCausalLM.from_pretrained(
-            "mistralai/Mistral-7B-v0.1",
+            self.snapshot_path,
             device_map={"": torch_device},
             quantization_config=BitsAndBytesConfig(load_in_4bit=True),
             attn_implementation="flash_attention_2",
@@ -161,7 +168,7 @@ class MistralIntegrationTest(unittest.TestCase):
         # An input with 4097 tokens that is above the size of the sliding window
         input_ids = [1] + [306, 338] * 2048
         model = MistralForCausalLM.from_pretrained(
-            "mistralai/Mistral-7B-v0.1", device_map="auto", attn_implementation="sdpa", dtype=torch.float16
+            self.snapshot_path, device_map="auto", attn_implementation="sdpa", dtype=torch.float16
         )
         input_ids = torch.tensor([input_ids]).to(model.model.embed_tokens.weight.device)
         generated_ids = model.generate(input_ids, max_new_tokens=4, temperature=0)
@@ -181,7 +188,7 @@ class MistralIntegrationTest(unittest.TestCase):
 
         EXPECTED_TEXT_COMPLETION = """My favourite condiment is 100% ketchup. I love it on everything. I’m not a big"""
         prompt = "My favourite condiment is "
-        tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=False)
+        tokenizer = AutoTokenizer.from_pretrained(self.snapshot_path, use_fast=False)
 
         input_ids = tokenizer.encode(prompt, return_tensors="pt").to(model.model.embed_tokens.weight.device)
 
@@ -192,10 +199,10 @@ class MistralIntegrationTest(unittest.TestCase):
 
     @slow
     def test_speculative_generation(self):
-        EXPECTED_TEXT_COMPLETION = "My favourite condiment is 100% ketchup. I’m not a fan of mustard, relish"
+        EXPECTED_TEXT_COMPLETION = "My favourite condiment is 100% ketchup. I'm not a fan of mustard, relish"
         prompt = "My favourite condiment is "
-        tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=False)
-        model = MistralForCausalLM.from_pretrained("mistralai/Mistral-7B-v0.1", device_map="auto", dtype=torch.float16)
+        tokenizer = AutoTokenizer.from_pretrained(self.snapshot_path, use_fast=False)
+        model = MistralForCausalLM.from_pretrained(self.snapshot_path, device_map="auto", dtype=torch.float16)
         input_ids = tokenizer.encode(prompt, return_tensors="pt").to(model.model.embed_tokens.weight.device)
 
         # greedy generation outputs
@@ -219,11 +226,9 @@ class MistralIntegrationTest(unittest.TestCase):
         ]
 
         prompts = ["My favourite condiment is "]
-        tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=False)
+        tokenizer = AutoTokenizer.from_pretrained(self.snapshot_path, use_fast=False)
         tokenizer.pad_token = tokenizer.eos_token
-        model = MistralForCausalLM.from_pretrained(
-            "mistralai/Mistral-7B-v0.1", device_map=torch_device, dtype=torch.float16
-        )
+        model = MistralForCausalLM.from_pretrained(self.snapshot_path, device_map=torch_device, dtype=torch.float16)
         inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(model.device)
 
         # Dynamic Cache
@@ -277,7 +282,7 @@ class MistralIntegrationTest(unittest.TestCase):
                 reason="`flex_attention` gives `torch._inductor.exc.InductorError: RuntimeError: No valid triton configs. OutOfMemoryError: out of resource: triton_tem_fused_0 Required: 147456 Hardware limit:101376 Reducing block sizes or `num_stages` may help.`"
             )
 
-        model_id = "mistralai/Mistral-7B-v0.1"
+        model_id = self.snapshot_path
         EXPECTED_COMPLETIONS = [
             "scenery, scenery, scenery, scenery, scenery,",
             ", green, yellow, orange, purple, pink, brown, black, white, gray, silver",

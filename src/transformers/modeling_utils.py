@@ -3316,6 +3316,7 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
         token: str | bool | None = None,
         save_peft_format: bool = True,
         save_original_format: bool = True,
+        save_format: str | None = None,
         **kwargs,
     ):
         """
@@ -3361,9 +3362,15 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
                 For backward compatibility with the previous versions of `transformers` you can save the checkpoint with
                 its reverse mapping. The reverse mapping needs to exists even if the model was loaded from a None legacy
                 checkpoint.
+            save_format (`str`, *optional*):
+                Override the save format. Supported values: ``"hf"`` (always save with HF key names),
+                ``"mistral"`` (save with native Mistral key names + ``params.json``). When ``None`` (default),
+                saves with whatever format the model was loaded in.
             kwargs (`dict[str, Any]`, *optional*):
                 Additional key word arguments passed along to the [`~utils.PushToHubMixin.push_to_hub`] method.
         """
+        if save_format is not None and save_format not in ("hf", "mistral"):
+            raise ValueError(f"Unknown save_format={save_format!r}. Supported values: 'hf', 'mistral'.")
         if token is not None:
             kwargs["token"] = token
 
@@ -3491,7 +3498,14 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
         state_dict = remove_tied_weights_from_state_dict(state_dict, model_to_save)
 
         # Revert all renaming and/or weight operations
-        if save_original_format and not _hf_peft_config_loaded:
+        # save_format="hf" forces HF key names (skip revert), save_format="mistral" forces native keys
+        if save_format == "hf":
+            pass  # Keep HF key names, no revert
+        elif save_format == "mistral":
+            from .integrations.mistral.weight_conversion import convert_state_dict_to_native
+
+            state_dict = convert_state_dict_to_native(model_to_save, state_dict)
+        elif save_original_format and not _hf_peft_config_loaded:
             state_dict = revert_weight_conversion(model_to_save, state_dict)
 
         # Shard the model if it is too big.
@@ -3574,6 +3588,12 @@ class PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToH
                 f"split in {len(state_dict_split.filename_to_tensors)} checkpoint shards. You can find where each parameters has been saved in the "
                 f"index located at {save_index_file}."
             )
+
+        # Handle native Mistral format: rename files and write params.json
+        if save_format == "mistral":
+            from .integrations.mistral.weight_conversion import save_native_mistral_format
+
+            save_native_mistral_format(save_directory, self.config, index, variant)
 
         if push_to_hub:
             # Eventually create an empty model card
