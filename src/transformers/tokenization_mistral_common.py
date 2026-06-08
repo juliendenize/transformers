@@ -1578,8 +1578,28 @@ class MistralCommonBackend(PreTrainedTokenizerBase):
         if save_format == "hf":
             from transformers.integrations.mistral import convert_tekken_tokenizer
 
-            hf_tokenizer = convert_tekken_tokenizer(str(self._tokenizer_path))
-            return hf_tokenizer.save_pretrained(str(save_directory))
+            tokenizer_path = self._tokenizer_path
+            if not tokenizer_path.is_file():
+                if self._tokenizer_raw_bytes is None:
+                    raise OSError(
+                        "Cannot convert to HF format: original tekken.json file is unavailable "
+                        "and no cached bytes were stored at init time."
+                    )
+                import tempfile
+
+                tmp = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+                tmp.write(self._tokenizer_raw_bytes)
+                tmp.close()
+                tokenizer_path = Path(tmp.name)
+
+            hf_tokenizer = convert_tekken_tokenizer(str(tokenizer_path))
+            return hf_tokenizer.save_pretrained(
+                str(save_directory),
+                push_to_hub=push_to_hub,
+                token=token,
+                repo_id=repo_id,
+                commit_message=commit_message,
+            )
 
         # Default: save in native mistral format.
         dest = save_directory / self._tokenizer_path.name
