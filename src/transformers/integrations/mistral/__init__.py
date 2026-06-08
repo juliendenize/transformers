@@ -1,4 +1,4 @@
-"""Mistral native format integration: tokenizer and config conversion utilities."""
+"""Mistral native format integration: config, weight, and tokenizer conversion."""
 
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ __all__ = [
     "_native_config_to_hf_config",
     "_parse_native_config_from_dict",
     "convert_state_dict_to_native",
+    "convert_tekken_image_processor",
+    "convert_tekken_tokenizer",
     "mistral3_native_text_converters",
     "mistral3_native_text_renamings",
     "mistral3_native_vision_converters",
@@ -25,6 +27,8 @@ __all__ = [
     "mistral_base_native_renamings",
     "native_config_for_model_type",
     "native_config_from_hf_config",
+    "resolve_mistral_format",
+    "save_as_tekken",
     "save_native_mistral_format",
 ]
 
@@ -41,6 +45,8 @@ _ATTR_TO_MODULE = {
     "_native_config_to_hf_config": _PARAMS_MODULE,
     "_parse_native_config_from_dict": _PARAMS_MODULE,
     "convert_state_dict_to_native": _WEIGHT_MODULE,
+    "convert_tekken_image_processor": _TOKENIZER_MODULE,
+    "convert_tekken_tokenizer": _TOKENIZER_MODULE,
     "mistral3_native_text_converters": _WEIGHT_MODULE,
     "mistral3_native_text_renamings": _WEIGHT_MODULE,
     "mistral3_native_vision_converters": _WEIGHT_MODULE,
@@ -51,15 +57,19 @@ _ATTR_TO_MODULE = {
     "mistral_base_native_renamings": _WEIGHT_MODULE,
     "native_config_for_model_type": _PARAMS_MODULE,
     "native_config_from_hf_config": _PARAMS_MODULE,
+    "resolve_mistral_format": _TOKENIZER_MODULE,
+    "save_as_tekken": _TOKENIZER_MODULE,
     "save_native_mistral_format": _WEIGHT_MODULE,
 }
 
 
 class _LazyModule(ModuleType):
+    """Lazily re-export public names to break circular imports."""
+
     def __getattr__(self, name: str):
         if name in _ATTR_TO_MODULE:
-            module = importlib.import_module(f".{_ATTR_TO_MODULE[name]}", __name__)
-            value = getattr(module, name)
+            submodule = importlib.import_module(f".{_ATTR_TO_MODULE[name]}", __name__)
+            value = getattr(submodule, name)
             setattr(self, name, value)
             return value
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

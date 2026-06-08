@@ -1981,6 +1981,7 @@ class PreTrainedTokenizerBase(PushToHubMixin):
         legacy_format: bool | None = None,
         filename_prefix: str | None = None,
         push_to_hub: bool = False,
+        save_format: str | None = None,
         **kwargs,
     ) -> tuple[str, ...]:
         """
@@ -2012,12 +2013,18 @@ class PreTrainedTokenizerBase(PushToHubMixin):
                 Whether or not to push your model to the Hugging Face model hub after saving it. You can specify the
                 repository you want to push to with `repo_id` (will default to the name of `save_directory` in your
                 namespace).
+            save_format (`str`, *optional*):
+                ``"mistral"`` to save as native ``tekken.json`` (requires that the tokenizer carries ``tekken_metadata``
+                in its ``init_kwargs``).  ``"hf"`` or *None* for the default HuggingFace format.
             kwargs (`dict[str, Any]`, *optional*):
                 Additional key word arguments passed along to the [`~utils.PushToHubMixin.push_to_hub`] method.
 
         Returns:
             A tuple of `str`: The files saved.
         """
+
+        if save_format is not None and save_format not in ("hf", "mistral"):
+            raise ValueError(f"Unknown save_format={save_format!r}. Supported values: 'hf', 'mistral'.")
 
         if os.path.isfile(save_directory):
             logger.error(f"Provided path ({save_directory}) should be a directory, not a file")
@@ -2031,99 +2038,105 @@ class PreTrainedTokenizerBase(PushToHubMixin):
             repo_id = hf_api().create_repo(repo_id, exist_ok=True, **kwargs).repo_id
             files_timestamps = self._get_files_timestamps(save_directory)
 
-        tokenizer_config_file = os.path.join(
-            save_directory, (filename_prefix + "-" if filename_prefix else "") + TOKENIZER_CONFIG_FILE
-        )
+        if save_format == "mistral":
+            from transformers.integrations.mistral.tokenizer import save_as_tekken
 
-        tokenizer_config = copy.deepcopy(self.init_kwargs)
-        tokenizer_config.pop("add_bos_token", None)
-        tokenizer_config.pop("add_eos_token", None)
+            output_path = save_as_tekken(self, save_directory)
+            save_files = (str(output_path),)
+        else:
+            tokenizer_config_file = os.path.join(
+                save_directory, (filename_prefix + "-" if filename_prefix else "") + TOKENIZER_CONFIG_FILE
+            )
 
-        # Let's save the init kwargs
-        target_keys = set(self.init_kwargs.keys())
-        target_keys.discard("add_bos_token")
-        target_keys.discard("add_eos_token")
-        # Let's save the special tokens map (only the strings)
-        target_keys.update(["model_max_length"])
+            tokenizer_config = copy.deepcopy(self.init_kwargs)
+            tokenizer_config.pop("add_bos_token", None)
+            tokenizer_config.pop("add_eos_token", None)
 
-        for k in target_keys:
-            if hasattr(self, k):
-                tokenizer_config[k] = getattr(self, k)
+            # Let's save the init kwargs
+            target_keys = set(self.init_kwargs.keys())
+            target_keys.discard("add_bos_token")
+            target_keys.discard("add_eos_token")
+            # Let's save the special tokens map (only the strings)
+            target_keys.update(["model_max_length"])
 
-        # Let's make sure we properly save the special tokens
-        # V5: Save both named tokens and extra tokens
-        tokenizer_config.update(self.special_tokens_map)
-        if self._extra_special_tokens:
-            tokenizer_config["extra_special_tokens"] = self.extra_special_tokens
+            for k in target_keys:
+                if hasattr(self, k):
+                    tokenizer_config[k] = getattr(self, k)
 
-        save_jinja_files = kwargs.get("save_jinja_files", True)
-        tokenizer_config, saved_raw_chat_template_files = self.save_chat_templates(
-            save_directory, tokenizer_config, filename_prefix, save_jinja_files
-        )
+            # Let's make sure we properly save the special tokens
+            # V5: Save both named tokens and extra tokens
+            tokenizer_config.update(self.special_tokens_map)
+            if self._extra_special_tokens:
+                tokenizer_config["extra_special_tokens"] = self.extra_special_tokens
 
-        if getattr(self, "response_schema", None) is not None:
-            tokenizer_config["response_schema"] = self.response_schema
+            save_jinja_files = kwargs.get("save_jinja_files", True)
+            tokenizer_config, saved_raw_chat_template_files = self.save_chat_templates(
+                save_directory, tokenizer_config, filename_prefix, save_jinja_files
+            )
 
-        if len(self.init_inputs) > 0:
-            tokenizer_config["init_inputs"] = copy.deepcopy(self.init_inputs)
-        for file_id in self.vocab_files_names:
-            tokenizer_config.pop(file_id, None)
+            if getattr(self, "response_schema", None) is not None:
+                tokenizer_config["response_schema"] = self.response_schema
 
-        # no typefields, this way old fast and slow can load it
-        tokenizer_config = self.convert_added_tokens(tokenizer_config, add_type_field=True, save=True)
-        # Process added tokens separately: allows previous versions to ignore it!
-        added_tokens = {}
-        for key, value in self.added_tokens_decoder.items():
-            added_tokens[key] = value.__getstate__()
-        tokenizer_config["added_tokens_decoder"] = added_tokens
+            if len(self.init_inputs) > 0:
+                tokenizer_config["init_inputs"] = copy.deepcopy(self.init_inputs)
+            for file_id in self.vocab_files_names:
+                tokenizer_config.pop(file_id, None)
 
-        # Add tokenizer class to the tokenizer config to be able to reload it with from_pretrained
-        tokenizer_class = self.__class__.__name__
+            # no typefields, this way old fast and slow can load it
+            tokenizer_config = self.convert_added_tokens(tokenizer_config, add_type_field=True, save=True)
+            # Process added tokens separately: allows previous versions to ignore it!
+            added_tokens = {}
+            for key, value in self.added_tokens_decoder.items():
+                added_tokens[key] = value.__getstate__()
+            tokenizer_config["added_tokens_decoder"] = added_tokens
 
-        # tokenizers backend don't need to save added_tokens_decoder and additional_special_tokens
-        if any(base.__name__ == "TokenizersBackend" for base in self.__class__.__mro__):
-            tokenizer_config.pop("added_tokens_decoder", None)
-            tokenizer_config.pop("additional_special_tokens", None)
+            # Add tokenizer class to the tokenizer config to be able to reload it with from_pretrained
+            tokenizer_class = self.__class__.__name__
 
-        # Remove the Fast at the end if we can save the slow tokenizer
-        if tokenizer_class.endswith("Fast") and getattr(self, "can_save_slow_tokenizer", False):
-            tokenizer_class = tokenizer_class[:-4]
-        tokenizer_config["tokenizer_class"] = tokenizer_class
-        if getattr(self, "_auto_map", None) is not None:
-            tokenizer_config["auto_map"] = self._auto_map
-        if getattr(self, "_processor_class", None) is not None:
-            tokenizer_config["processor_class"] = self._processor_class
-        tokenizer_config.pop("files_loaded", None)
-        # If we have a custom model, we copy the file defining it in the folder and set the attributes so it can be
-        # loaded from the Hub.
-        if self._auto_class is not None:
-            custom_object_save(self, save_directory, config=tokenizer_config)
+            # tokenizers backend don't need to save added_tokens_decoder and additional_special_tokens
+            if any(base.__name__ == "TokenizersBackend" for base in self.__class__.__mro__):
+                tokenizer_config.pop("added_tokens_decoder", None)
+                tokenizer_config.pop("additional_special_tokens", None)
 
-        # remove private information
-        if "name_or_path" in tokenizer_config:
-            tokenizer_config.pop("name_or_path")
-            tokenizer_config.pop("special_tokens_map_file", None)
-            tokenizer_config.pop("tokenizer_file", None)
-        if "device_map" in tokenizer_config:
-            tokenizer_config.pop("device_map")
-        if "slow_tokenizer_class" in tokenizer_config:
-            tokenizer_config.pop("slow_tokenizer_class")
+            # Remove the Fast at the end if we can save the slow tokenizer
+            if tokenizer_class.endswith("Fast") and getattr(self, "can_save_slow_tokenizer", False):
+                tokenizer_class = tokenizer_class[:-4]
+            tokenizer_config["tokenizer_class"] = tokenizer_class
+            if getattr(self, "_auto_map", None) is not None:
+                tokenizer_config["auto_map"] = self._auto_map
+            if getattr(self, "_processor_class", None) is not None:
+                tokenizer_config["processor_class"] = self._processor_class
+            tokenizer_config.pop("files_loaded", None)
+            # If we have a custom model, we copy the file defining it in the folder and set the attributes so it can be
+            # loaded from the Hub.
+            if self._auto_class is not None:
+                custom_object_save(self, save_directory, config=tokenizer_config)
 
-        with open(tokenizer_config_file, "w", encoding="utf-8") as f:
-            out_str = json.dumps(tokenizer_config, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
-            f.write(out_str)
-        logger.info(f"tokenizer config file saved in {tokenizer_config_file}")
+            # remove private information
+            if "name_or_path" in tokenizer_config:
+                tokenizer_config.pop("name_or_path")
+                tokenizer_config.pop("special_tokens_map_file", None)
+                tokenizer_config.pop("tokenizer_file", None)
+            if "device_map" in tokenizer_config:
+                tokenizer_config.pop("device_map")
+            if "slow_tokenizer_class" in tokenizer_config:
+                tokenizer_config.pop("slow_tokenizer_class")
 
-        # Sanitize AddedTokens in special_tokens_map
+            with open(tokenizer_config_file, "w", encoding="utf-8") as f:
+                out_str = json.dumps(tokenizer_config, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+                f.write(out_str)
+            logger.info(f"tokenizer config file saved in {tokenizer_config_file}")
 
-        file_names = (tokenizer_config_file, *saved_raw_chat_template_files)
+            # Sanitize AddedTokens in special_tokens_map
 
-        save_files = self._save_pretrained(
-            save_directory=save_directory,
-            file_names=file_names,
-            legacy_format=legacy_format,
-            filename_prefix=filename_prefix,
-        )
+            file_names = (tokenizer_config_file, *saved_raw_chat_template_files)
+
+            save_files = self._save_pretrained(
+                save_directory=save_directory,
+                file_names=file_names,
+                legacy_format=legacy_format,
+                filename_prefix=filename_prefix,
+            )
 
         if push_to_hub:
             self._upload_modified_files(
