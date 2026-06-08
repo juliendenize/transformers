@@ -70,8 +70,8 @@ def _extract_yarn(config: PreTrainedConfig) -> YarnArgs | None:
     return YarnArgs(
         factor=rope_params["factor"],
         original_max_position_embeddings=rope_params["original_max_position_embeddings"],
-        beta=int(rope_params["beta_fast"]),
-        alpha=int(rope_params["beta_slow"]),
+        beta=float(rope_params["beta_fast"]),
+        alpha=float(rope_params["beta_slow"]),
         apply_scale=apply_scale,
     )
 
@@ -93,10 +93,10 @@ class YarnArgs:
     respectively.
     """
 
-    factor: int
+    factor: float
     original_max_position_embeddings: int
-    beta: int  # corresponds to HF rope_parameters["beta_fast"]
-    alpha: int  # corresponds to HF rope_parameters["beta_slow"]
+    beta: float  # corresponds to HF rope_parameters["beta_fast"]
+    alpha: float  # corresponds to HF rope_parameters["beta_slow"]
     apply_scale: bool
 
 
@@ -519,7 +519,9 @@ def _hf_quant_config_to_native(hf_config: PreTrainedConfig) -> QuantizationArgs 
     qc = quant_cfg.to_dict()
     if qc.get("quant_method") != "fp8":
         return None
-    scheme = _REVERSE_QUANTIZATION_SCHEME_MAP.get(qc.get("activation_scheme", "static"), "TENSOR")
+    scheme = _REVERSE_QUANTIZATION_SCHEME_MAP.get(qc.get("activation_scheme", "static"))
+    if scheme is None:
+        return None
     return QuantizationArgs(qformat_weight=QFormat.FP8_E4M3, qscheme_act=scheme)
 
 

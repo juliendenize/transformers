@@ -120,18 +120,6 @@ def mistral_params() -> dict:
     return copy.deepcopy(MISTRAL_PARAMS)
 
 
-def ministral3_params() -> dict:
-    return copy.deepcopy(MINISTRAL3_PARAMS)
-
-
-def mistral4_params() -> dict:
-    return copy.deepcopy(MISTRAL4_PARAMS)
-
-
-def mistral3_params() -> dict:
-    return copy.deepcopy(MISTRAL3_PARAMS)
-
-
 def base_native_config() -> MistralNativeConfig:
     return MistralNativeConfig(
         dim=4096,

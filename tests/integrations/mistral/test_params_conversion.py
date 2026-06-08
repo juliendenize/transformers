@@ -84,6 +84,27 @@ class TestQuantizationArgs(unittest.TestCase):
             QuantizationArgs("int8", "TENSOR")
 
 
+class TestHfQuantConfigToNative(unittest.TestCase):
+    def test_unknown_fp8_activation_scheme_returns_none(self) -> None:
+        """Unknown FP8 activation_scheme should return None, not silently map to TENSOR."""
+        from transformers.integrations.mistral.params_conversion import _hf_quant_config_to_native
+
+        hf_config = MistralConfig(
+            hidden_size=4096,
+            num_hidden_layers=32,
+            intermediate_size=14336,
+            num_attention_heads=32,
+            num_key_value_heads=8,
+            rms_norm_eps=1e-5,
+            head_dim=128,
+            vocab_size=32000,
+            max_position_embeddings=32768,
+            quantization_config=_make_hf_fp8_quant_config("dynamic"),
+        )
+        result = _hf_quant_config_to_native(hf_config)
+        self.assertIsNone(result)
+
+
 class TestGetMaybeQuantConfig(unittest.TestCase):
     def test_none_returns_none(self) -> None:
         self.assertIsNone(_get_maybe_quant_config(is_vision_model=False, quantization_args=None))
