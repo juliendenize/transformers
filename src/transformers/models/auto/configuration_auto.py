@@ -376,13 +376,9 @@ class AutoConfig:
             config_dict, unused_kwargs = PreTrainedConfig.get_config_dict(pretrained_model_name_or_path, **kwargs)
         except OSError as e:
             # Check if this is a native Mistral checkpoint with params.json instead of config.json.
-            error_msg = str(e).lower()
-            is_missing_file = (
-                "does not appear to have" in error_msg
-                or "is not a local folder" in error_msg
-                or "can't find" in error_msg
-            )
-            if not is_missing_file:
+            from ...integrations.mistral.config_format import _is_missing_file_error
+
+            if not _is_missing_file_error(e):
                 raise
             config_error = e
             config_dict = {}

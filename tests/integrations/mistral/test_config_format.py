@@ -17,7 +17,6 @@ import json
 import os
 import tempfile
 import unittest
-from collections.abc import Callable
 from pathlib import Path
 
 from huggingface_hub.constants import SAFETENSORS_INDEX_FILE, SAFETENSORS_SINGLE_FILE
@@ -31,15 +30,6 @@ from transformers.integrations.mistral.config_format import (
 from transformers.integrations.mistral.params_conversion import native_config_for_model_type
 
 from .mistral_fixture_data import MINISTRAL3_PARAMS, MISTRAL3_PARAMS, MISTRAL4_PARAMS, MISTRAL_PARAMS, mistral_params
-
-
-def _make_cached_file_side_effect(existing_files: set[str]) -> Callable[..., str | None]:
-    def _side_effect(path: str, filename: str, **kwargs) -> str | None:
-        if filename in existing_files:
-            return os.path.join(str(path), filename)
-        return None
-
-    return _side_effect
 
 
 def _make_tmpdir_with_files(tmpdir: str, filenames: set[str]) -> None:

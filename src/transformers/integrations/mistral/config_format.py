@@ -33,6 +33,17 @@ from ...utils import cached_file, logging
 
 logger = logging.get_logger(__name__)
 
+
+def _is_missing_file_error(error: OSError) -> bool:
+    """Check if an OSError indicates a missing file vs a real error (network, permission).
+
+    Used to distinguish recoverable missing-file errors (where we can fall back to
+    params.json) from genuine failures that should be re-raised.
+    """
+    error_msg = str(error).lower()
+    return "does not appear to have" in error_msg or "is not a local folder" in error_msg or "can't find" in error_msg
+
+
 # Weight file names
 _CONSOLIDATED_SINGLE_FILE = "consolidated.safetensors"
 _CONSOLIDATED_INDEX_FILE = "consolidated.safetensors.index.json"
@@ -79,15 +90,7 @@ class MistralFormatConfig(PreTrainedConfig):
             except OSError as e:
                 if mistral_format is False:
                     raise
-                # Only fall through to params.json for missing-file errors.
-                # Re-raise real errors (network, permission, etc.) even during auto-detect.
-                error_msg = str(e).lower()
-                is_missing_file = (
-                    "does not appear to have" in error_msg
-                    or "is not a local folder" in error_msg
-                    or "can't find" in error_msg
-                )
-                if not is_missing_file:
+                if not _is_missing_file_error(e):
                     raise
 
         return cls._get_config_dict_from_params_json(pretrained_model_name_or_path, **kwargs)
@@ -224,7 +227,7 @@ class MistralFormatConfig(PreTrainedConfig):
             def _remote_exists(filename):
                 try:
                     return hf_hub_file_exists(repo_id, filename, **hub_kwargs)
-                except Exception:
+                except (OSError, ValueError):
                     return False
 
             return _remote_exists
