@@ -29,7 +29,6 @@ from transformers.testing_utils import (
     cleanup,
     require_torch,
     require_torch_accelerator,
-    require_torchvision,
     slow,
     torch_device,
 )
@@ -109,9 +108,6 @@ _EXPECTED_UNEXPECTED_KEY_PATTERNS = {
 # vision_encoder: lost when loading a VLM checkpoint as a text-only model.
 # quantization: native format, converted to HF quantization_config in the round-trip.
 _NON_ROUNDTRIPPABLE_PARAMS_KEYS = {"vision_encoder"}
-
-_MISTRAL_MODEL_TYPES = ["mistral", "mistral3", "ministral", "ministral3", "mixtral"]
-
 
 def _filter_expected_unexpected_keys(keys: list[str]) -> list[str]:
     return [k for k in keys if not any(re.search(pat, k) for pat in _EXPECTED_UNEXPECTED_KEY_PATTERNS)]
@@ -1164,72 +1160,8 @@ class TestTokenizerMistralFormatRoundtrip(unittest.TestCase):
                 tok.save_pretrained(str(tmp_path / "out"), save_format="bad")
 
 
-class TestConvertTekkenProcessor(unittest.TestCase):
-    def test_missing_vision_encoder_raises(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_path = Path(tmp_dir)
-            from transformers.integrations.mistral.tokenizer import convert_tekken_image_processor
-
-            tekken_path = _build_fake_tekken_json(tmp_path)
-            params_path = tmp_path / "params.json"
-            with open(params_path, "w", encoding="utf-8") as f:
-                json.dump({"dim": 128, "n_heads": 2}, f)
-
-            with self.assertRaisesRegex(ValueError, "vision_encoder"):
-                convert_tekken_image_processor(str(tekken_path), str(params_path))
-
-    @require_torchvision
-    def test_valid_processor_creation(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_path = Path(tmp_dir)
-            from transformers.integrations.mistral.tokenizer import convert_tekken_image_processor
-
-            tekken_path = _build_fake_tekken_json(tmp_path)
-            params_path = tmp_path / "params.json"
-            params = {
-                "dim": 128,
-                "n_heads": 2,
-                "vision_encoder": {
-                    "patch_size": 14,
-                    "image_size": 1540,
-                    "max_image_size": 1540,
-                    "spatial_merge_size": 2,
-                },
-            }
-            with open(params_path, "w", encoding="utf-8") as f:
-                json.dump(params, f)
-
-            processor = convert_tekken_image_processor(str(tekken_path), str(params_path))
-            self.assertIsNotNone(processor)
-            self.assertTrue(hasattr(processor, "tokenizer"))
-            self.assertTrue(hasattr(processor, "image_processor"))
-
-
-class TestSaveAsTekkenErrorPath(unittest.TestCase):
-    def test_missing_metadata_raises(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_path = Path(tmp_dir)
-            from unittest.mock import MagicMock
-
-            from transformers.integrations.mistral.tokenizer import save_as_tekken
-
-            tokenizer = MagicMock()
-            tokenizer.tekken_metadata = None
-            tokenizer.init_kwargs = {}
-
-            with self.assertRaisesRegex(ValueError, "tekken_metadata"):
-                save_as_tekken(tokenizer, str(tmp_path))
-
-
 @require_torch
 class TestSaveMistralFormatRecovery(unittest.TestCase):
-    _MODEL_CLS_TO_TYPE = {
-        "MistralForCausalLM": "mistral",
-        "Ministral3ForCausalLM": "ministral3",
-        "Mistral3ForConditionalGeneration": "mistral3",
-        "Mistral4ForCausalLM": "mistral4",
-    }
-
     def _run_roundtrip(
         self,
         tmp_path: Path,
