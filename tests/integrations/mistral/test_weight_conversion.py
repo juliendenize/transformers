@@ -478,6 +478,51 @@ class TestFP8AwareSplitAndUnstack:
 
 
 @require_torch
+class TestFP8AwareBlockwiseRealisticBlockSize:
+    def test_roundtrip_blockwise_fp8_realistic_block_size(self):
+        """Block-wise FP8 with block_size > 1: scale shape != weight shape."""
+        merge_op = FP8AwareMergeAndConcatenate()
+        split_op = FP8AwareSplitAndUnstack()
+
+        n_experts = 2
+        gate_dim, up_dim, in_dim = 256, 256, 512
+        block_size = 128
+        scale_rows = gate_dim // block_size  # 2
+        scale_cols = in_dim // block_size  # 4
+
+        w1 = [torch.randn(gate_dim, in_dim).to(torch.float8_e4m3fn) for _ in range(n_experts)]
+        w3 = [torch.randn(up_dim, in_dim).to(torch.float8_e4m3fn) for _ in range(n_experts)]
+        w1_scales = [torch.randn(scale_rows, scale_cols) for _ in range(n_experts)]
+        w3_scales = [torch.randn(scale_rows, scale_cols) for _ in range(n_experts)]
+
+        fused = merge_op.convert(
+            input_dict={
+                "w1.weight": w1,
+                "w3.weight": w3,
+                "w1.qscale_weight": w1_scales,
+                "w3.qscale_weight": w3_scales,
+            },
+            source_patterns=["w1.weight", "w3.weight", "w1.qscale_weight", "w3.qscale_weight"],
+            target_patterns=["gate_up_proj", "gate_up_proj_scale_inv"],
+        )
+
+        reversed_result = split_op.convert(
+            input_dict={
+                "gate_up_proj": [fused["gate_up_proj"]],
+                "gate_up_proj_scale_inv": [fused["gate_up_proj_scale_inv"]],
+            },
+            source_patterns=["gate_up_proj", "gate_up_proj_scale_inv"],
+            target_patterns=["w1.weight", "w3.weight", "w1.qscale_weight", "w3.qscale_weight"],
+        )
+
+        for e in range(n_experts):
+            torch.testing.assert_close(reversed_result["w1.weight"][e], w1[e])
+            torch.testing.assert_close(reversed_result["w3.weight"][e], w3[e])
+            torch.testing.assert_close(reversed_result["w1.qscale_weight"][e], w1_scales[e])
+            torch.testing.assert_close(reversed_result["w3.qscale_weight"][e], w3_scales[e])
+
+
+@require_torch
 class TestFP8ScaleFusionMerge:
     def test_per_tensor_merge(self):
         op = FP8ScaleFusionMerge()

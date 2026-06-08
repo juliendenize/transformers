@@ -367,7 +367,7 @@ def _apply_weight_conversions_to_state_dict(model, state_dict, weight_mapping):
     if len(converters) == 0:
         new_state_dict = {}
         for original_key, tensor in state_dict.items():
-            renamed_key, _ = rename_source_key(
+            renamed_key, _, _ = rename_source_key(
                 original_key, renamings, [], base_model_prefix=base_model_prefix, meta_state_dict=model_state_dict
             )
             if renamed_key in model_state_dict:
@@ -378,7 +378,6 @@ def _apply_weight_conversions_to_state_dict(model, state_dict, weight_mapping):
         return new_state_dict
 
     # Full path: we have WeightConverter operations that require tensor fusion/splitting
-    pattern_to_converter = {k: converter for converter in converters for k in converter.source_patterns}
 
     # Build a mapping of what needs to be converted
     # Sort keys to ensure consistent ordering (important for MoE conversions)
@@ -388,7 +387,7 @@ def _apply_weight_conversions_to_state_dict(model, state_dict, weight_mapping):
     sorted_keys = sorted(state_dict.keys(), key=lambda k: dot_natural_key(k))
     for original_key in sorted_keys:
         tensor = state_dict.pop(original_key)
-        renamed_key, source_pattern = rename_source_key(
+        renamed_key, source_pattern, matched_converter = rename_source_key(
             original_key, renamings, converters, base_model_prefix=base_model_prefix, meta_state_dict=model_state_dict
         )
 
@@ -398,7 +397,7 @@ def _apply_weight_conversions_to_state_dict(model, state_dict, weight_mapping):
             if source_pattern is not None:
                 # Create a fresh converter for this layer to hold its tensors
                 # Share operations list (lightweight, no large data) but get new collected_tensors
-                converter = pattern_to_converter[source_pattern]
+                converter = matched_converter
                 new_converter = WeightConverter(
                     source_patterns=converter.source_patterns,
                     target_patterns=converter.target_patterns,

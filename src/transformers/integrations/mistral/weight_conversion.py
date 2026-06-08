@@ -670,11 +670,12 @@ class FP8AwareSplitAndUnstack(ConversionOps):
                 # Per-tensor scales: duplicate the same scale for w1 and w3
                 scale_list = list(fused_scales.squeeze(-1).squeeze(-1).unbind(dim=0))
                 result[w1_scale_key] = scale_list
-                result[w3_scale_key] = scale_list
+                result[w3_scale_key] = [s.clone() for s in scale_list]
             else:
-                # Block-wise scales: split along dim=1
-                w1_scales = list(fused_scales[:, :half_dim].unbind(dim=0))
-                w3_scales = list(fused_scales[:, half_dim:].unbind(dim=0))
+                # Block-wise scales: split along dim=1 using the scale tensor's own shape
+                scale_half = fused_scales.shape[1] // 2
+                w1_scales = list(fused_scales[:, :scale_half].unbind(dim=0))
+                w3_scales = list(fused_scales[:, scale_half:].unbind(dim=0))
                 result[w1_scale_key] = w1_scales
                 result[w3_scale_key] = w3_scales
 
@@ -689,7 +690,7 @@ class FP8AwareSplitAndUnstack(ConversionOps):
 
             act_list = list(act_scales.unbind(dim=0))
             result[w1_act_key] = act_list
-            result[w3_act_key] = act_list
+            result[w3_act_key] = [s.clone() for s in act_list]
 
         return result
 
@@ -781,8 +782,13 @@ def mistral3_native_text_renamings() -> list[MistralWeightRenaming]:
 
 
 def mistral3_native_text_converters() -> list[MistralWeightConverter]:
-    r"""Converters for Mistral3 text backbone."""
-    return [
+    r"""Converters for Mistral3 text backbone.
+
+    Uses ``scope_prefix`` to restrict matching to language-model keys,
+    preventing conflict with vision-tower converters that share the same
+    ``attention.wq/wk`` suffix patterns.
+    """
+    converters = [
         MistralWeightConverter(
             source_patterns=r"attention\.wq\.weight$",
             target_patterns="self_attn.q_proj.weight",
@@ -804,6 +810,9 @@ def mistral3_native_text_converters() -> list[MistralWeightConverter]:
             operations=[MergeModulelist(dim=0)],
         ),
     ]
+    for c in converters:
+        c.scope_prefix = "model.language_model"
+    return converters
 
 
 _VISION_LAYER_RENAMINGS: list[tuple[str, str]] = [
@@ -828,19 +837,29 @@ def mistral3_native_vision_renamings() -> list[MistralWeightRenaming]:
 
 
 def mistral3_native_vision_converters() -> list[MistralWeightConverter]:
-    r"""Converters for Mistral3 vision encoder PermuteForRope transforms."""
-    return [
+    r"""Converters for Mistral3 vision encoder PermuteForRope transforms.
+
+    Uses ``scope_prefix`` to restrict matching to vision-tower keys, preventing
+    conflict with text-backbone converters that share the same
+    ``attention.wq/wk`` suffix patterns.  Literal ``target_patterns`` avoid
+    the regex backreference issue that ``WeightConverter.convert()`` cannot
+    resolve (see ``\1`` bug).
+    """
+    converters = [
         MistralWeightConverter(
-            source_patterns=r"(model\.vision_tower\..*\.)attention\.wq\.weight$",
-            target_patterns=r"\1attention.q_proj.weight",
+            source_patterns=r"attention\.wq\.weight$",
+            target_patterns="attention.q_proj.weight",
             operations=[PermuteForRope(n_heads_attr="vision_config.num_attention_heads")],
         ),
         MistralWeightConverter(
-            source_patterns=r"(model\.vision_tower\..*\.)attention\.wk\.weight$",
-            target_patterns=r"\1attention.k_proj.weight",
+            source_patterns=r"attention\.wk\.weight$",
+            target_patterns="attention.k_proj.weight",
             operations=[PermuteForRope(n_heads_attr="vision_config.num_attention_heads")],
         ),
     ]
+    for c in converters:
+        c.scope_prefix = "model.vision_tower"
+    return converters
 
 
 _MISTRAL4_LAYER_RENAMINGS: list[tuple[str, str]] = [
@@ -1003,7 +1022,7 @@ def save_native_mistral_format(
     if index is not None:
         new_weight_map = {}
         for param_name, shard_file in index["weight_map"].items():
-            new_shard = shard_file.replace("model", "consolidated")
+            new_shard = shard_file.replace("model", "consolidated", 1)
             new_weight_map[param_name] = new_shard
             src = os.path.join(save_directory, shard_file)
             dst = os.path.join(save_directory, new_shard)
