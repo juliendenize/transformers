@@ -193,7 +193,13 @@ class PixtralProcessor(ProcessorMixin):
             )
 
         # Native format: need params.json too
-        params_file = cached_file(pretrained_model_name_or_path, "params.json", **_cache_kwargs)
+        params_file = cached_file(
+            pretrained_model_name_or_path,
+            "params.json",
+            _raise_exceptions_for_missing_entries=False,
+            _raise_exceptions_for_connection_errors=False,
+            **_cache_kwargs,
+        )
         if params_file is None:
             raise OSError(
                 f"Cannot find 'params.json' at '{pretrained_model_name_or_path}'. "

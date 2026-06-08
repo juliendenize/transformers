@@ -428,6 +428,8 @@ class AutoProcessor:
                     )
                     if use_mistral:
                         processor_class = "PixtralProcessor"
+                else:
+                    raise
 
         if processor_class is not None:
             processor_class = processor_class_from_name(processor_class)
