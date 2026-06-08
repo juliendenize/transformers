@@ -147,6 +147,13 @@ class TestResolveMistralFormat(unittest.TestCase):
             use, path = resolve_mistral_format(tmp_dir, mistral_format=None)
             self.assertFalse(use)
 
+    @patch("transformers.integrations.mistral.tokenizer.is_mistral_common_available", return_value=True)
+    def test_true_without_tekken_file_raises_helpful_error(self, _mock):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with self.assertRaises(OSError) as ctx:
+                resolve_mistral_format(tmp_dir, mistral_format=True)
+            self.assertIn("mistral_format=False", str(ctx.exception))
+
     @patch("transformers.integrations.mistral.tokenizer.is_mistral_common_available", return_value=False)
     def test_true_without_mistral_common_raises(self, _mock):
         with self.assertRaises(ImportError):

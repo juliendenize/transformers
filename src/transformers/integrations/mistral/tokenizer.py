@@ -81,7 +81,13 @@ def resolve_mistral_format(
             raise ImportError(
                 "mistral_format=True requires `mistral-common`. Install it with: pip install mistral-common"
             )
-        tekken_file = cached_file(pretrained_model_name_or_path, "tekken.json", **cache_kwargs)
+        tekken_file = cached_file(
+            pretrained_model_name_or_path,
+            "tekken.json",
+            _raise_exceptions_for_missing_entries=False,
+            _raise_exceptions_for_connection_errors=False,
+            **cache_kwargs,
+        )
         if tekken_file is None:
             raise OSError(
                 f"Cannot find 'tekken.json' at '{pretrained_model_name_or_path}'. "
@@ -441,11 +447,6 @@ def convert_tekken_image_processor(
     Raises:
         ValueError: If `params_file` does not contain a `vision_encoder` key.
     """
-    # Lazy imports: processing_pixtral imports from integrations.mistral at module level,
-    # so importing it here avoids a circular dependency.
-    from ...models.pixtral.image_processing_pixtral import PixtralImageProcessor
-    from ...models.pixtral.processing_pixtral import PixtralProcessor
-
     with open(params_file, encoding="utf-8") as f:
         params = json.load(f)
 
@@ -456,6 +457,12 @@ def convert_tekken_image_processor(
             "This model does not appear to be a vision-language model and does not need a processor. "
             "Use `convert_tekken_tokenizer` for text-only models instead."
         )
+
+    # Lazy imports: processing_pixtral imports from integrations.mistral at module level,
+    # so importing it here avoids a circular dependency. Placed after validation to avoid
+    # triggering heavy imports (torchvision) for text-only models that will fail anyway.
+    from ...models.pixtral.image_processing_pixtral import PixtralImageProcessor
+    from ...models.pixtral.processing_pixtral import PixtralProcessor
 
     patch_size = vision_config["patch_size"]
     max_image_size = vision_config.get("max_image_size", vision_config["image_size"])
