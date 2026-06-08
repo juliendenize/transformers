@@ -11,13 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 import torch
 from parameterized import parameterized
 
-from transformers.testing_utils import require_vision
+from transformers.testing_utils import require_mistral_common, require_vision
 from transformers.utils import is_vision_available
 
 from ...test_processing_common import ProcessorTesterMixin, url_to_local_path
@@ -25,6 +27,50 @@ from ...test_processing_common import ProcessorTesterMixin, url_to_local_path
 
 if is_vision_available():
     from transformers import PixtralProcessor
+
+
+def _build_mistral_common_tokenizer():
+    """Build a real MistralCommonBackend with all special tokens required by mistral-common."""
+    import base64
+    import json
+
+    from mistral_common.tokens.tokenizers.base import SpecialTokens
+
+    from transformers.tokenization_mistral_common import MistralCommonBackend
+
+    # Collect all special tokens defined by mistral-common
+    special_tokens = [{"rank": i, "token_str": st.value, "is_control": True} for i, st in enumerate(SpecialTokens)]
+    num_special = len(special_tokens)
+    vocab_size = 256 + num_special
+
+    # Build BPE vocab from single raw bytes
+    vocab_list = []
+    for rank in range(256):
+        raw_byte = bytes([rank])
+        vocab_list.append({"rank": rank, "token_bytes": base64.b64encode(raw_byte).decode("ascii"), "token_str": None})
+
+    tekken_data = {
+        "vocab": vocab_list,
+        "special_tokens": special_tokens,
+        "config": {
+            "pattern": r"""(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+""",
+            "num_vocab_tokens": 256,
+            "default_vocab_size": vocab_size,
+            "default_num_special_tokens": num_special,
+            "version": "v3",
+        },
+        "version": 1,
+        "type": "tekken",
+    }
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tekken_path = Path(tmpdir) / "tekken.json"
+        with open(tekken_path, "w", encoding="utf-8") as f:
+            json.dump(tekken_data, f, ensure_ascii=False)
+
+        # Tokenizer caches raw bytes at init, so cleanup is safe after construction
+        tokenizer = MistralCommonBackend(tokenizer_path=tekken_path)
+    return tokenizer
 
 
 @require_vision
@@ -253,6 +299,35 @@ class PixtralProcessorTest(ProcessorTesterMixin, unittest.TestCase):
             [21510, 1058, 1032, 10, 10, 12, 10, 10, 13, 10, 10, 12, 10, 10, 13, 1010, 7493, 1681, 1278, 6592, 2396, 2576, 2295, 8061, 1063, 1349, 4290, 16002, 41150, 1058]
         )
         # fmt: on
+
+    @require_mistral_common
+    def test_apply_chat_template_with_mistral_common_backend(self):
+        """PixtralProcessor.apply_chat_template delegates to MistralCommonBackend and produces real tokens."""
+
+        processor = self.processor_class.from_pretrained(self.tmpdirname)
+
+        mc_tokenizer = _build_mistral_common_tokenizer()
+
+        processor.tokenizer = mc_tokenizer
+
+        conversation = [{"role": "user", "content": "Hello"}]
+
+        result_str = processor.apply_chat_template(conversation, tokenize=False)
+        self.assertIsInstance(result_str, str)
+        self.assertIn("Hello", result_str)
+
+        result_dict = processor.apply_chat_template(conversation, tokenize=True, return_dict=True)
+        self.assertIn("input_ids", result_dict)
+        self.assertTrue(len(result_dict["input_ids"]) > 0)
+
+        result_pt = processor.apply_chat_template(conversation, tokenize=True, return_dict=True, return_tensors="pt")
+        self.assertIn("input_ids", result_pt)
+        self.assertIsInstance(result_pt["input_ids"], torch.Tensor)
+        self.assertTrue(result_pt["input_ids"].numel() > 0)
+
+        result_ids = processor.apply_chat_template(conversation, tokenize=True, return_dict=False)
+        self.assertIsInstance(result_ids, list)
+        self.assertTrue(len(result_ids) > 0)
 
     def test_processor_returns_full_length_batches(self):
         # to avoid https://github.com/huggingface/transformers/issues/34204
