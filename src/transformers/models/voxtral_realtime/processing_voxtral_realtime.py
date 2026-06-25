@@ -92,7 +92,7 @@ class VoxtralRealtimeProcessor(ProcessorMixin):
 
     @property
     def num_delay_tokens(self):
-        return self.mistral_common_audio_config.num_delay_tokens
+        return self.mistral_common_audio_config.get_num_delay_tokens()
 
     @property
     def num_right_pad_tokens(self):
