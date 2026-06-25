@@ -24,9 +24,8 @@ if is_soundfile_available():
     pass
 
 if is_mistral_common_available():
-    from mistral_common.audio import Audio
-    from mistral_common.protocol.instruct.chunk import RawAudio
     from mistral_common.protocol.transcription.request import StreamingMode, TranscriptionRequest
+    from mistral_common.tokens.tokenizers.audio import Audio
 
 from ...audio_utils import AudioInput, make_list_of_audio
 from ...feature_extraction_utils import BatchFeature
@@ -174,7 +173,7 @@ class VoxtralRealtimeProcessor(ProcessorMixin):
                     audio_array=audio_el, sampling_rate=output_kwargs["audio_kwargs"]["sampling_rate"], format="wav"
                 )
                 transcription_request = TranscriptionRequest(
-                    audio=RawAudio.from_audio(audio),
+                    audio=audio.to_base64(audio.format),
                     streaming=StreamingMode.ONLINE if is_streaming else StreamingMode.OFFLINE,
                     language=None,
                 )
