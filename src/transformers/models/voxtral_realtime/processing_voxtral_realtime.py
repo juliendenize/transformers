@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import numpy as np
+
 from ...tokenization_mistral_common import MistralCommonBackend
 from ...utils import auto_docstring, is_mistral_common_available, is_soundfile_available, is_torch_available, logging
 from ...utils.import_utils import requires
@@ -169,19 +171,36 @@ class VoxtralRealtimeProcessor(ProcessorMixin):
         if is_first_audio_chunk:
             for audio_el in audio:
                 # NOTE: format here is used only for serialization and therefore we can use wav for any audio array
-                audio = Audio(
+                audio_obj = Audio(
                     audio_array=audio_el, sampling_rate=output_kwargs["audio_kwargs"]["sampling_rate"], format="wav"
                 )
-                transcription_request = TranscriptionRequest(
-                    audio=audio.to_base64(audio.format),
-                    streaming=StreamingMode.ONLINE if is_streaming else StreamingMode.OFFLINE,
-                    language=None,
-                )
-                tokenized_transcription_request = self.tokenizer.tokenizer.encode_transcription(transcription_request)
+                if is_streaming:
+                    # In online streaming mode, `mistral_common` expects no audio in the transcription request:
+                    # the prompt only sets up the streaming prefill and the returned tokens do not depend on the
+                    # audio. We reconstruct the prefill audio array ourselves by prepending the encoder's left
+                    # padding to the audio (round-tripped through wav to match the serialization).
+                    transcription_request = TranscriptionRequest(
+                        audio="", streaming=StreamingMode.ONLINE, language=None
+                    )
+                    tokenized_transcription_request = self.tokenizer.tokenizer.encode_transcription(
+                        transcription_request
+                    )
+                    left_pad_audio_array = tokenized_transcription_request.audios[0].audio_array
+                    prefill_audio_array = Audio.from_base64(audio_obj.to_base64(audio_obj.format)).audio_array
+                    audio_arrays.append(np.concatenate((left_pad_audio_array, prefill_audio_array)))
+                else:
+                    transcription_request = TranscriptionRequest(
+                        audio=audio_obj.to_base64(audio_obj.format),
+                        streaming=StreamingMode.OFFLINE,
+                        language=None,
+                    )
+                    tokenized_transcription_request = self.tokenizer.tokenizer.encode_transcription(
+                        transcription_request
+                    )
+                    audio_arrays.extend([el.audio_array for el in tokenized_transcription_request.audios])
 
                 input_ids.append(tokenized_transcription_request.tokens)
                 texts.append(tokenized_transcription_request.text)
-                audio_arrays.extend([el.audio_array for el in tokenized_transcription_request.audios])
 
                 text_encoding = self.tokenizer(input_ids, **output_kwargs["text_kwargs"])
         else:
